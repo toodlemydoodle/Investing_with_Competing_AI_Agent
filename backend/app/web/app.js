@@ -57,6 +57,16 @@ function card(title, body, meta = []) {
   `;
 }
 
+function cardHtml(title, bodyHtml, meta = []) {
+  return `
+    <div class="card">
+      <div class="card-head"><strong>${title}</strong>${meta[0] || ''}</div>
+      ${bodyHtml}
+      ${meta.length > 1 ? `<div class="meta">${meta.slice(1).join('')}</div>` : ''}
+    </div>
+  `;
+}
+
 function agentName(value) {
   const name = String(value || '').trim();
   if (!name) { return 'Unknown Agent'; }
@@ -227,12 +237,14 @@ function renderPositions(data) {
     const totalValue = holdings.reduce((sum, holding) => sum + Number(holding.market_value || 0), 0);
     const totalUnrealized = holdings.reduce((sum, holding) => sum + Number(holding.unrealized_pl || 0), 0);
     const body = holdings.length
-      ? holdings
-        .map((holding) => `${holding.symbol} ${fmtShares(holding.quantity)} shares at ${fmtMoney(holding.market_price)}`)
-        .join(' | ')
-      : 'No assigned holdings.';
+      ? `
+        <ul class="holding-list">
+          ${holdings.map((holding) => `<li><strong>${holding.symbol}</strong><span>${fmtShares(holding.quantity)} shares at ${fmtMoney(holding.market_price)}</span></li>`).join('')}
+        </ul>
+      `
+      : '<p>No assigned holdings.</p>';
 
-    return card(
+    return cardHtml(
       names[agent.slug] || agent.slug,
       body,
       [
