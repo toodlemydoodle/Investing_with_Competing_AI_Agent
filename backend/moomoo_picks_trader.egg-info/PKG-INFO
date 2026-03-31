@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: moomoo-picks-trader
+Version: 0.1.0
+Summary: Local trading dashboard and execution service for moomoo OpenAPI
+Requires-Python: >=3.11
+Requires-Dist: fastapi<1.0.0,>=0.116.0
+Requires-Dist: pydantic-settings<3.0.0,>=2.7.0
+Requires-Dist: sqlalchemy<3.0.0,>=2.0.38
+Requires-Dist: uvicorn[standard]<1.0.0,>=0.34.0
+Provides-Extra: dev
+Requires-Dist: pytest<9.0.0,>=8.3.0; extra == "dev"
+Provides-Extra: moomoo
+Requires-Dist: moomoo-api<11.0.0,>=9.4.5408; extra == "moomoo"

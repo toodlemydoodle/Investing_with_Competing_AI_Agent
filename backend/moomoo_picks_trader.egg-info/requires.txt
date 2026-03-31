@@ -1,0 +1,10 @@
+fastapi<1.0.0,>=0.116.0
+pydantic-settings<3.0.0,>=2.7.0
+sqlalchemy<3.0.0,>=2.0.38
+uvicorn[standard]<1.0.0,>=0.34.0
+
+[dev]
+pytest<9.0.0,>=8.3.0
+
+[moomoo]
+moomoo-api<11.0.0,>=9.4.5408
