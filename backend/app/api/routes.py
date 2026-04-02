@@ -138,6 +138,7 @@ def map_settings(settings: Settings, db: Session) -> SettingsResponse:
         competition_benchmark_current_price=benchmark['current_price'],
         competition_benchmark_return_pct=benchmark['return_pct'],
         competition_benchmark_last_updated_at=benchmark['last_updated_at'],
+        competition_benchmark_history=benchmark['history'],
         research_enabled=settings.research_enabled,
         research_max_symbols_per_agent=settings.research_max_symbols_per_agent,
         research_max_generated_decisions_per_agent=settings.research_max_generated_decisions_per_agent,
@@ -416,11 +417,11 @@ def get_dashboard_overview(
 
     agents = get_strategy_agents(db, settings)
     agent_positions = get_agent_positions(db)
-    agent_trades = get_agent_trades(db)
+    agent_trades = get_agent_trades(db, limit=10)
     research_notes = get_research_notes(db)
     accounts = db.scalars(select(BrokerAccount).order_by(BrokerAccount.acc_id)).all()
     positions = db.scalars(select(Position).order_by(Position.market_value.desc())).all()
-    orders = db.scalars(select(BrokerOrder).order_by(BrokerOrder.updated_at.desc())).all()
+    orders = db.scalars(select(BrokerOrder).order_by(BrokerOrder.updated_at.desc()).limit(10)).all()
     decisions = db.scalars(
         select(Decision).order_by(Decision.strategy_name.asc(), Decision.conviction_score.desc())
     ).all()

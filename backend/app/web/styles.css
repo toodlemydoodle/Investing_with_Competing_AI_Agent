@@ -284,6 +284,103 @@ button.primary {
   font-size: 2rem;
 }
 
+.benchmark-stat {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, rgba(255,252,247,0.96), rgba(247,240,229,0.9)),
+    radial-gradient(circle at top right, rgba(46,107,94,0.12), transparent 30%);
+}
+
+.benchmark-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.benchmark-copy h3 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.benchmark-value {
+  margin-top: 10px;
+  font-family: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
+  font-size: clamp(2.2rem, 4.8vw, 3.5rem);
+  line-height: 1.02;
+}
+
+.benchmark-change,
+.benchmark-note {
+  margin: 8px 0 0;
+}
+
+.benchmark-change {
+  font-size: 1.06rem;
+  font-weight: 700;
+}
+
+.benchmark-change.up { color: var(--moss); }
+.benchmark-change.down { color: var(--red); }
+.benchmark-change.neutral { color: var(--muted); }
+
+.benchmark-note {
+  color: var(--muted);
+}
+
+.benchmark-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(170px, 1fr));
+  gap: 10px 12px;
+  min-width: min(100%, 360px);
+}
+
+.benchmark-summary span {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.74);
+  border: 1px solid rgba(26, 33, 29, 0.08);
+  color: var(--muted);
+}
+
+.benchmark-chart-shell {
+  border-radius: 20px;
+  border: 1px solid rgba(26, 33, 29, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.82), rgba(243,236,224,0.92)),
+    radial-gradient(circle at top left, rgba(46,107,94,0.08), transparent 34%);
+  padding: 14px;
+  min-height: 300px;
+}
+
+.benchmark-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.benchmark-chart-empty {
+  min-height: 272px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+}
+
+.benchmark-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .stack,
 .warning-list {
   list-style: none;
@@ -442,4 +539,6 @@ th {
   .shell { width: min(100vw - 18px, 1080px); }
   .order-form { grid-template-columns: 1fr; }
   .masthead-badges { justify-content: flex-start; }
+  .benchmark-summary { grid-template-columns: 1fr; }
+  .benchmark-stat { padding: 20px; }
 }

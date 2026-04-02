@@ -34,6 +34,10 @@ FILLED_ORDER_STATUSES = {'FILLED', 'FILLED_ALL', 'SUCCESS_ALL'}
 EPSILON = 1e-9
 BROKER_ORDER_TIMEZONE = ZoneInfo('America/New_York')
 BROKER_ORDER_SYNC_CUTOFF_PATH = BACKEND_ROOT / '.broker-order-sync-cutoff.txt'
+BENCHMARK_HISTORY_KEY = 'competition_benchmark_history'
+BENCHMARK_START_AT_KEY = 'competition_benchmark_start_at'
+BENCHMARK_HISTORY_LIMIT = 288
+BENCHMARK_HISTORY_MIN_INTERVAL_SECONDS = 240
 _ADAPTER_CACHE_LOCK = Lock()
 _ADAPTER_CACHE: dict[tuple[object, ...], BrokerAdapter] = {}
 
@@ -344,6 +348,98 @@ def _get_broker_order_sync_cutoff() -> datetime | None:
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _load_competition_benchmark_history(db: Session) -> list[dict[str, object]]:
+    raw = get_setting_value(db, BENCHMARK_HISTORY_KEY, '[]')
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    points: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        recorded_at = _parse_datetime_setting(str(item.get('recorded_at') or ''))
+        try:
+            price = round(float(item.get('price')), 4)
+        except (TypeError, ValueError):
+            continue
+        if recorded_at is None or price <= 0:
+            continue
+        points.append({'price': price, 'recorded_at': recorded_at})
+
+    points.sort(key=lambda point: point['recorded_at'])
+    return points[-BENCHMARK_HISTORY_LIMIT:]
+
+
+def _store_competition_benchmark_history(db: Session, points: list[dict[str, object]]) -> None:
+    payload = [
+        {
+            'price': round(float(point['price']), 4),
+            'recorded_at': point['recorded_at'].isoformat(),
+        }
+        for point in points[-BENCHMARK_HISTORY_LIMIT:]
+        if isinstance(point.get('recorded_at'), datetime)
+    ]
+    set_setting_value(db, BENCHMARK_HISTORY_KEY, json.dumps(payload))
+
+
+def _build_competition_benchmark_history_fallback(
+    start_price: float | None,
+    start_at: datetime | None,
+    current_price: float | None,
+    last_updated_at: datetime | None,
+) -> list[dict[str, object]]:
+    points: list[dict[str, object]] = []
+    if start_price is not None and start_price > 0:
+        points.append(
+            {
+                'price': round(float(start_price), 4),
+                'recorded_at': start_at or last_updated_at or datetime.utcnow(),
+            }
+        )
+    if current_price is not None and current_price > 0:
+        current_point = {
+            'price': round(float(current_price), 4),
+            'recorded_at': last_updated_at or start_at or datetime.utcnow(),
+        }
+        if not points:
+            points.append(current_point)
+        else:
+            first = points[0]
+            if abs(float(first['price']) - current_point['price']) >= EPSILON or first['recorded_at'] != current_point['recorded_at']:
+                points.append(current_point)
+    points.sort(key=lambda point: point['recorded_at'])
+    return points
+
+
+def _append_competition_benchmark_history(db: Session, price: float, recorded_at: datetime) -> list[dict[str, object]]:
+    if price <= 0:
+        return _load_competition_benchmark_history(db)
+
+    point = {'price': round(float(price), 4), 'recorded_at': recorded_at}
+    history = _load_competition_benchmark_history(db)
+    if not history:
+        history = [point]
+    else:
+        last = history[-1]
+        age_seconds = (recorded_at - last['recorded_at']).total_seconds()
+        last_price = float(last['price'])
+        if age_seconds <= 0 or age_seconds < BENCHMARK_HISTORY_MIN_INTERVAL_SECONDS:
+            history[-1] = point
+        elif abs(last_price - point['price']) < EPSILON:
+            return history
+        else:
+            history.append(point)
+
+    history.sort(key=lambda item: item['recorded_at'])
+    history = history[-BENCHMARK_HISTORY_LIMIT:]
+    _store_competition_benchmark_history(db, history)
+    return history
+
+
 def get_competition_benchmark_state(
     db: Session,
     settings: Settings,
@@ -355,11 +451,16 @@ def get_competition_benchmark_state(
     if stored_symbol != symbol:
         set_setting_value(db, 'competition_benchmark_symbol', symbol)
         set_setting_value(db, 'competition_benchmark_start_price', '')
-        set_setting_value(db, 'competition_benchmark_current_price', '')
         set_setting_value(db, 'competition_benchmark_last_updated_at', '')
+        set_setting_value(db, 'competition_benchmark_current_price', '')
+        set_setting_value(db, BENCHMARK_START_AT_KEY, '')
+        set_setting_value(db, BENCHMARK_HISTORY_KEY, '[]')
+
     start_price = _parse_float_setting(get_setting_value(db, 'competition_benchmark_start_price', ''))
     current_price = _parse_float_setting(get_setting_value(db, 'competition_benchmark_current_price', ''))
+    start_at = _parse_datetime_setting(get_setting_value(db, BENCHMARK_START_AT_KEY, ''))
     last_updated_at = _parse_datetime_setting(get_setting_value(db, 'competition_benchmark_last_updated_at', ''))
+    history = _load_competition_benchmark_history(db)
 
     if refresh:
         try:
@@ -370,9 +471,18 @@ def get_competition_benchmark_state(
             set_setting_value(db, 'competition_benchmark_last_updated_at', last_updated_at.isoformat())
             if start_price is None or start_price <= 0:
                 start_price = current_price
+                start_at = last_updated_at
                 set_setting_value(db, 'competition_benchmark_start_price', str(start_price))
+                set_setting_value(db, BENCHMARK_START_AT_KEY, start_at.isoformat())
+            elif start_at is None:
+                start_at = last_updated_at
+                set_setting_value(db, BENCHMARK_START_AT_KEY, start_at.isoformat())
+            history = _append_competition_benchmark_history(db, current_price, last_updated_at)
         except Exception:
             pass
+
+    if not history:
+        history = _build_competition_benchmark_history_fallback(start_price, start_at, current_price, last_updated_at)
 
     return_pct = None
     if start_price is not None and start_price > 0 and current_price is not None and current_price > 0:
@@ -384,6 +494,7 @@ def get_competition_benchmark_state(
         'current_price': current_price,
         'return_pct': return_pct,
         'last_updated_at': last_updated_at,
+        'history': history,
     }
 
 
@@ -809,6 +920,8 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
     ensure_default_setting(db, 'competition_benchmark_start_price', '')
     ensure_default_setting(db, 'competition_benchmark_current_price', '')
     ensure_default_setting(db, 'competition_benchmark_last_updated_at', '')
+    ensure_default_setting(db, BENCHMARK_START_AT_KEY, '')
+    ensure_default_setting(db, BENCHMARK_HISTORY_KEY, '[]')
     benchmark_symbol = settings.competition_benchmark_symbol
     benchmark_rule_message = f'Both agents compete for capital. After day 90, an agent that trails {benchmark_symbol} loses the arena.'
     if settings.moomoo_acc_id is not None and db.get(AppSetting, 'selected_acc_id') is None:
@@ -1167,6 +1280,7 @@ def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, 
             notes=order.remark or 'Paper order fill recorded in agent ledger.',
         )
 
+    get_competition_benchmark_state(db, settings, refresh=True)
     refresh_strategy_game_state(db, settings, commit=False)
     db.commit()
     return db.get(BrokerOrder, broker_order.order_id)

@@ -185,6 +185,11 @@ class AlertResponse(BaseModel):
     created_at: datetime
 
 
+class BenchmarkPointResponse(BaseModel):
+    price: float
+    recorded_at: datetime
+
+
 class SettingsResponse(BaseModel):
     app_mode: str
     broker_backend: str
@@ -203,6 +208,7 @@ class SettingsResponse(BaseModel):
     competition_benchmark_current_price: float | None = None
     competition_benchmark_return_pct: float | None = None
     competition_benchmark_last_updated_at: datetime | None = None
+    competition_benchmark_history: list[BenchmarkPointResponse] = Field(default_factory=list)
     research_enabled: bool
     research_max_symbols_per_agent: int
     research_max_generated_decisions_per_agent: int

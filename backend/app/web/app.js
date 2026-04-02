@@ -129,10 +129,167 @@ function bindClick(id, handler) {
   return el;
 }
 
+function benchmarkHistoryPoints(settings) {
+  return (settings.competition_benchmark_history || [])
+    .map((point) => {
+      const price = Number(point.price || 0);
+      const recordedAt = point.recorded_at;
+      const date = parseApiDate(recordedAt);
+      return price > 0 && date ? { price, recordedAt, date } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.date - right.date);
+}
+
+function easternDayKey(value) {
+  const date = parseApiDate(value);
+  return date
+    ? new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date)
+    : '';
+}
+
+function fmtBenchmarkAxis(value, referenceValue) {
+  const date = parseApiDate(value);
+  if (!date) { return 'n/a'; }
+  const sameDay = easternDayKey(value) === easternDayKey(referenceValue || value);
+  return new Intl.DateTimeFormat('en-US', sameDay
+    ? {
+      timeZone: 'America/New_York',
+      hour: 'numeric',
+      minute: '2-digit',
+    }
+    : {
+      timeZone: 'America/New_York',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+    }).format(date);
+}
+
+function fmtBenchmarkLabel(value) {
+  return Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function buildBenchmarkChart(history) {
+  if (!history.length) {
+    return {
+      high: null,
+      low: null,
+      markup: '<div class="benchmark-chart-empty">Refresh Broker State or let autopilot run to start tracking benchmark history.</div>',
+    };
+  }
+
+  const prices = history.map((point) => point.price);
+  const high = Math.max(...prices);
+  const low = Math.min(...prices);
+  if (history.length < 2) {
+    return {
+      high,
+      low,
+      markup: '<div class="benchmark-chart-empty">One more benchmark snapshot will turn this into a live chart.</div>',
+    };
+  }
+
+  const width = 920;
+  const height = 300;
+  const padding = { top: 18, right: 20, bottom: 30, left: 18 };
+  const innerWidth = width - padding.left - padding.right;
+  const innerHeight = height - padding.top - padding.bottom;
+  const spread = Math.max(high - low, high * 0.01, 0.35);
+  const floor = low - (spread * 0.2);
+  const ceiling = high + (spread * 0.2);
+  const valueRange = Math.max(ceiling - floor, 0.01);
+  const x = (index) => padding.left + ((index / (history.length - 1)) * innerWidth);
+  const y = (price) => padding.top + (((ceiling - price) / valueRange) * innerHeight);
+  const linePath = history.map((point, index) => `${index === 0 ? 'M' : 'L'} ${x(index).toFixed(2)} ${y(point.price).toFixed(2)}`).join(' ');
+  const fillPath = `${linePath} L ${x(history.length - 1).toFixed(2)} ${(padding.top + innerHeight).toFixed(2)} L ${x(0).toFixed(2)} ${(padding.top + innerHeight).toFixed(2)} Z`;
+  const gridValues = Array.from({ length: 4 }, (_, index) => ceiling - ((ceiling - floor) * index / 3));
+  const gridLines = gridValues.map((value) => {
+    const gy = y(value);
+    return `
+      <line x1="${padding.left}" y1="${gy.toFixed(2)}" x2="${(width - padding.right).toFixed(2)}" y2="${gy.toFixed(2)}" stroke="rgba(26, 33, 29, 0.10)" stroke-width="1" />
+      <text x="${(width - 4).toFixed(2)}" y="${Math.max(14, gy - 6).toFixed(2)}" text-anchor="end" fill="rgba(90, 97, 90, 0.9)" font-size="11">${fmtBenchmarkLabel(value)}</text>
+    `;
+  }).join('');
+  const last = history[history.length - 1];
+  const lastX = x(history.length - 1);
+  const lastY = y(last.price);
+  const labelCenterX = Math.min(width - padding.right - 60, Math.max(padding.left + 60, lastX));
+  const labelTopY = Math.max(padding.top + 8, lastY - 32);
+
+  return {
+    high,
+    low,
+    markup: `
+      <svg class="benchmark-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Benchmark price history chart">
+        <defs>
+          <linearGradient id="benchmark-fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#2e6b5e" stop-opacity="0.34" />
+            <stop offset="100%" stop-color="#2e6b5e" stop-opacity="0.04" />
+          </linearGradient>
+        </defs>
+        ${gridLines}
+        <path d="${fillPath}" fill="url(#benchmark-fill)" />
+        <path d="${linePath}" fill="none" stroke="#2e6b5e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+        <line x1="${lastX.toFixed(2)}" y1="${padding.top}" x2="${lastX.toFixed(2)}" y2="${(padding.top + innerHeight).toFixed(2)}" stroke="rgba(23, 73, 63, 0.18)" stroke-width="1.2" stroke-dasharray="4 5" />
+        <circle cx="${lastX.toFixed(2)}" cy="${lastY.toFixed(2)}" r="5" fill="#2e6b5e" stroke="rgba(255, 252, 247, 0.95)" stroke-width="2.5" />
+        <rect x="${(labelCenterX - 60).toFixed(2)}" y="${labelTopY.toFixed(2)}" width="120" height="24" rx="12" fill="rgba(20, 53, 47, 0.9)" />
+        <text x="${labelCenterX.toFixed(2)}" y="${(labelTopY + 16).toFixed(2)}" text-anchor="middle" fill="rgba(255, 250, 243, 0.96)" font-size="11">${fmtBenchmarkLabel(last.price)}</text>
+      </svg>
+    `,
+  };
+}
+
+function renderBenchmarkPanel(settings) {
+  const symbol = settings.competition_benchmark_symbol || 'US.SPY';
+  const cleanSymbol = String(symbol).replace('US.', '');
+  const history = benchmarkHistoryPoints(settings);
+  const chart = buildBenchmarkChart(history);
+  const currentPrice = settings.competition_benchmark_current_price ?? (history.length ? history[history.length - 1].price : null);
+  const startPrice = settings.competition_benchmark_start_price ?? (history.length ? history[0].price : null);
+  const benchmarkReturn = settings.competition_benchmark_return_pct;
+  const returnText = benchmarkReturn === null || benchmarkReturn === undefined
+    ? 'Waiting for benchmark refresh.'
+    : `${benchmarkReturn >= 0 ? '+' : ''}${Number(benchmarkReturn || 0).toFixed(1)}% since arena start`;
+  const returnTone = benchmarkReturn === null || benchmarkReturn === undefined ? 'neutral' : (benchmarkReturn >= 0 ? 'up' : 'down');
+  const updatedText = settings.competition_benchmark_last_updated_at
+    ? `Updated ${fmtDateTime(settings.competition_benchmark_last_updated_at)}`
+    : 'Refresh Broker State or let autopilot run to build benchmark history.';
+
+  return `
+    <article class="stat benchmark-stat">
+      <div class="benchmark-top">
+        <div class="benchmark-copy">
+          <p class="eyebrow">Benchmark</p>
+          <h3>${cleanSymbol}</h3>
+          <div class="benchmark-value">${fmtMaybeMoney(currentPrice)}</div>
+          <p class="benchmark-change ${returnTone}">${returnText}</p>
+          <p class="benchmark-note">${updatedText}</p>
+        </div>
+        <div class="benchmark-summary">
+          <span>Start ${fmtMaybeMoney(startPrice)}</span>
+          <span>Now ${fmtMaybeMoney(currentPrice)}</span>
+          <span>Range ${fmtMaybeMoney(chart.low)} to ${fmtMaybeMoney(chart.high)}</span>
+          <span>${history.length} samples</span>
+        </div>
+      </div>
+      <div class="benchmark-chart-shell">${chart.markup}</div>
+      <div class="benchmark-chart-axis">
+        <span>${history.length ? fmtBenchmarkAxis(history[0].recordedAt, history[0].recordedAt) : 'Start'}</span>
+        <span>${history.length ? fmtBenchmarkAxis(history[history.length - 1].recordedAt, history[0].recordedAt) : 'Now'}</span>
+      </div>
+    </article>
+  `;
+}
+
 function renderStats(data) {
   const winner = data.agents.find((agent) => agent.is_winner) || null;
   const aliveCount = data.agents.filter((agent) => agent.is_alive).length;
-  const accountSummary = data.broker_health.account_summary || {};
   const windowDays = data.agents[0] ? data.agents[0].competition_window_days : 90;
   const benchmarkSymbol = data.settings.competition_benchmark_symbol || 'US.SPY';
   const benchmarkReturn = data.settings.competition_benchmark_return_pct;
@@ -140,14 +297,13 @@ function renderStats(data) {
     .filter((agent) => agent.is_alive && !agent.is_eligible_for_elimination && agent.elimination_ready_at)
     .map((agent) => agent.elimination_ready_at)
     .sort()[0];
-  document.getElementById('stats').innerHTML = [
+  const statCards = [
     ['Bankroll Cap', fmtMoney(data.settings.risk_bankroll_cap), `Max order ${fmtMoney(data.settings.risk_max_order_notional)}`],
     ['Surviving Agents', String(aliveCount), `${data.agents.length - aliveCount} eliminated`],
     ['Leading Agent', winner ? agentName(winner.name) : 'No survivor', winner ? `${fmtPercent(winner.total_return_pct)} total return | ${fmtWeight(winner.target_weight)} capital` : 'No live agent to reward'],
     ['Arena Rule', `${windowDays}-day benchmark test`, nextCheck ? `First elimination window opens ${fmtDate(nextCheck)} | ${benchmarkSymbol} ${fmtMaybePercent(benchmarkReturn)}` : `After warm-up, trailing ${benchmarkSymbol} means elimination`],
-    ['Benchmark', benchmarkSymbol, `Start ${fmtMaybeMoney(data.settings.competition_benchmark_start_price)} | Now ${fmtMaybeMoney(data.settings.competition_benchmark_current_price)} | ${fmtMaybePercent(benchmarkReturn)}`],
-    ['Buying Power', fmtMoney(accountSummary.available_funds), `Cash ${fmtMoney(accountSummary.cash)}`],
   ].map(([label, value, detail]) => `<article class="stat"><p class="eyebrow">${label}</p><h3>${value}</h3><p>${detail}</p></article>`).join('');
+  document.getElementById('stats').innerHTML = `${statCards}${renderBenchmarkPanel(data.settings)}`;
 }
 
 function agentBadge(agent, benchmarkReturn, benchmarkSymbol) {
@@ -207,7 +363,13 @@ function renderAgentTrades(data) {
   el.innerHTML = data.agent_trades.length ? data.agent_trades.map((trade) => card(
     trade.symbol,
     `${trade.side} ${trade.quantity} @ ${fmtMoney(trade.price)} | Notional ${fmtMoney(trade.notional)}`,
-    [pill(trade.side === 'BUY' ? 'ok' : 'warn', trade.side), `<span>${names[trade.agent_slug] || trade.agent_slug}</span>`, `<span>Realized ${fmtMoney(trade.realized_pl)}</span>`, `<span>${trade.order_id || 'manual ledger event'}</span>`]
+    [
+      pill(trade.side === 'BUY' ? 'ok' : 'warn', trade.side),
+      `<span>${names[trade.agent_slug] || trade.agent_slug}</span>`,
+      `<span>Realized ${fmtMoney(trade.realized_pl)}</span>`,
+      `<span>${trade.order_id || 'manual ledger event'}</span>`,
+      `<span>${fmtDateTime(trade.created_at)}</span>`
+    ]
   )).join('') : '<p class="empty">No agent trade events yet.</p>';
 }
 
