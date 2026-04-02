@@ -34,6 +34,7 @@ FILLED_ORDER_STATUSES = {'FILLED', 'FILLED_ALL', 'SUCCESS_ALL'}
 EPSILON = 1e-9
 BROKER_ORDER_TIMEZONE = ZoneInfo('America/New_York')
 BROKER_ORDER_SYNC_CUTOFF_PATH = BACKEND_ROOT / '.broker-order-sync-cutoff.txt'
+BROKER_RECONCILIATION_ALERT_TITLE = 'Broker ledger reconciliation warning'
 BENCHMARK_HISTORY_KEY = 'competition_benchmark_history'
 BENCHMARK_START_AT_KEY = 'competition_benchmark_start_at'
 BENCHMARK_HISTORY_LIMIT = 288
@@ -533,7 +534,7 @@ def update_agent_survival_state(agent: StrategyAgent) -> None:
     current_value = max(agent.current_value, 0.0)
     agent.current_value = current_value
     agent.total_return_pct = round(((current_value - starting_capital) / starting_capital) * 100, 2)
-    agent.cash_buffer = max(agent.cash_buffer, 0.0)
+    agent.cash_buffer = round(agent.cash_buffer, 2)
     agent.performance_score = round(
         clamp(5.0 + ((agent.rolling_net_pnl / starting_capital) * 25.0), 0.0, 10.0),
         2,
@@ -616,6 +617,7 @@ def apply_trade_to_agent(
     quantity: float,
     price: float,
     notes: str = '',
+    enforce_cash_limits: bool = True,
 ) -> AgentTrade:
     normalized_side = side.strip().upper()
     if normalized_side not in {'BUY', 'SELL'}:
@@ -634,7 +636,7 @@ def apply_trade_to_agent(
     realized_pl = 0.0
 
     if normalized_side == 'BUY':
-        if notional > available_cash + EPSILON:
+        if enforce_cash_limits and notional > available_cash + EPSILON:
             raise ValueError(
                 f'Agent `{agent.name}` only has {available_cash:.2f} in cash. Reduce size or wait for more capital.'
             )
@@ -694,14 +696,44 @@ def apply_trade_to_agent(
     return trade
 
 
+def _upsert_broker_reconciliation_alert(db: Session, failures: list[str]) -> None:
+    alert = db.scalar(select(Alert).where(Alert.title == BROKER_RECONCILIATION_ALERT_TITLE))
+    if not failures:
+        if alert is not None and alert.is_active:
+            alert.is_active = False
+            alert.updated_at = datetime.utcnow()
+        return
+
+    message = 'Some filled broker orders could not be applied to the local agent ledger. '
+    message += ' | '.join(failures[:3])
+    if len(failures) > 3:
+        message += f' | and {len(failures) - 3} more.'
+
+    if alert is None:
+        db.add(
+            Alert(
+                severity='warning',
+                title=BROKER_RECONCILIATION_ALERT_TITLE,
+                message=message,
+                is_active=True,
+            )
+        )
+        return
+
+    alert.severity = 'warning'
+    alert.message = message
+    alert.is_active = True
+    alert.updated_at = datetime.utcnow()
+
 def sync_agent_trades_from_orders(db: Session, settings: Settings) -> list[AgentTrade]:
     filled_orders = db.scalars(
         select(BrokerOrder).where(
             BrokerOrder.agent_slug.is_not(None),
             BrokerOrder.filled_quantity > 0,
-        )
+        ).order_by(BrokerOrder.created_at.asc(), BrokerOrder.updated_at.asc(), BrokerOrder.order_id.asc())
     ).all()
     created: list[AgentTrade] = []
+    failures: list[str] = []
     for order in filled_orders:
         existing_trade = db.scalar(select(AgentTrade).where(AgentTrade.order_id == order.order_id))
         if existing_trade is not None:
@@ -710,18 +742,24 @@ def sync_agent_trades_from_orders(db: Session, settings: Settings) -> list[Agent
         if agent is None:
             continue
         fill_price = order.average_fill_price or order.price
-        trade = apply_trade_to_agent(
-            db,
-            agent,
-            order_id=order.order_id,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.filled_quantity,
-            price=fill_price,
-            notes=order.remark or 'Broker-synced agent fill.',
-        )
+        try:
+            trade = apply_trade_to_agent(
+                db,
+                agent,
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.filled_quantity,
+                price=fill_price,
+                notes=order.remark or 'Broker-synced agent fill.',
+                enforce_cash_limits=False,
+            )
+        except ValueError as exc:
+            failures.append(f'{order.order_id} {order.side} {order.symbol}: {exc}')
+            continue
         created.append(trade)
-    if created:
+    _upsert_broker_reconciliation_alert(db, failures)
+    if created or failures:
         refresh_strategy_game_state(db, settings, commit=False)
     return created
 
@@ -1278,6 +1316,7 @@ def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, 
             quantity=order.filled_quantity,
             price=order.average_fill_price or order.price,
             notes=order.remark or 'Paper order fill recorded in agent ledger.',
+            enforce_cash_limits=False,
         )
 
     get_competition_benchmark_state(db, settings, refresh=True)

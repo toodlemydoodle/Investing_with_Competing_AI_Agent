@@ -396,8 +396,8 @@ function renderPositions(data) {
   const trackedAgents = data.agents;
   el.innerHTML = trackedAgents.length ? trackedAgents.map((agent) => {
     const holdings = positionsByOwner[agent.slug] || [];
-    const totalValue = holdings.reduce((sum, holding) => sum + Number(holding.market_value || 0), 0);
-    const totalUnrealized = holdings.reduce((sum, holding) => sum + Number(holding.unrealized_pl || 0), 0);
+    const holdingsValue = holdings.reduce((sum, holding) => sum + Number(holding.market_value || 0), 0);
+    const netValue = Number(agent.current_value || 0);
     const body = holdings.length
       ? `
         <ul class="holding-list">
@@ -411,10 +411,10 @@ function renderPositions(data) {
       body,
       [
         pill(agent.style === 'specialist' ? 'ok' : 'warn', agent.style),
-        `<span>${holdings.length} holdings</span>`,
-        `<span>Cash left ${fmtMoney(agent.cash_buffer)}</span>`,
-        `<span>Total value ${fmtMoney(totalValue)}</span>`,
-        `<span>Unrealized ${fmtMoney(totalUnrealized)}</span>`,
+        `<span>Holdings ${holdings.length}</span>`,
+        `<span>Value ${fmtMoney(holdingsValue)}</span>`,
+        `<span>Cash ${fmtMoney(agent.cash_buffer)}</span>`,
+        `<span>Net value ${fmtMoney(netValue)}</span>`,
       ]
     );
   }).join('') : '<p class="empty">No tracked agent holdings yet.</p>';
