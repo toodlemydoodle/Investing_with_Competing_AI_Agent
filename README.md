@@ -57,7 +57,7 @@ If you already started an older version of this scaffold, the runtime will renam
 - Backend docs: `http://localhost:8000/docs`
 
 ## Recent paper-trading results
-The screenshot below shows a recent paper-trading snapshot from the local agent arena.
+The screenshot below shows only 1 agent that was given very little safe guards to do it's own investment. This was over the course of 2 weeks. The agent had close to 600% return.
 
 ![Paper trading results](./output/images/papertrade.png)
 
