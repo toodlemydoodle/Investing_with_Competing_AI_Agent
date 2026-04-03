@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -116,3 +116,7 @@ app.mount('/static', StaticFiles(directory=web_dir), name='static')
 @app.get('/app', include_in_schema=False)
 def serve_embedded_app() -> FileResponse:
     return FileResponse(web_dir / 'index.html')
+
+@app.get('/favicon.ico', include_in_schema=False)
+def serve_favicon() -> FileResponse:
+    return FileResponse(web_dir / 'favicon.svg', media_type='image/svg+xml')

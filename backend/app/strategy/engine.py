@@ -17,6 +17,8 @@ from app.services.trading import bootstrap_database
 from app.services.trading import build_broker_adapter
 from app.services.trading import get_active_mode
 from app.services.trading import get_agent_cash
+from app.services.trading import get_live_capped_agent_slug
+from app.services.trading import get_runtime_settings
 from app.services.trading import get_setting_value
 from app.services.trading import refresh_broker_state
 from app.services.trading import set_setting_value
@@ -136,11 +138,11 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         return result
 
     mode = get_active_mode(db, settings)
-    if mode != 'paper':
+    if mode not in {'paper', 'live_capped'}:
         result = {
             'enabled': True,
             'executed_orders': 0,
-            'events': [f'Autopilot only runs in paper mode. Current mode is {mode}.'],
+            'events': [f'Autopilot only runs in paper or live capped mode. Current mode is {mode}.'],
             'last_cycle_at': now,
         }
         set_setting_value(db, 'agent_autopilot_last_cycle_at', now.isoformat())
@@ -148,7 +150,8 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         db.commit()
         return result
 
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     refresh_broker_state(db, adapter, settings)
 
     alive_agents = db.scalars(
@@ -156,8 +159,22 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         .where(StrategyAgent.is_enabled.is_(True), StrategyAgent.is_alive.is_(True))
         .order_by(StrategyAgent.is_winner.desc(), StrategyAgent.slug.asc())
     ).all()
+    if mode == 'live_capped':
+        allowed_slug = get_live_capped_agent_slug(runtime_settings)
+        alive_agents = [agent for agent in alive_agents if agent.slug == allowed_slug]
+        if not alive_agents:
+            result = {
+                'enabled': True,
+                'executed_orders': 0,
+                'events': ['Live capped mode only trades Pick-and-Shovel, but that agent is not currently eligible.'],
+                'last_cycle_at': now,
+            }
+            set_setting_value(db, 'agent_autopilot_last_cycle_at', now.isoformat())
+            set_setting_value(db, 'agent_autopilot_last_summary', result['events'][0])
+            db.commit()
+            return result
 
-    refresh_live_research(db, settings, agents=alive_agents)
+    refresh_live_research(db, runtime_settings, agents=alive_agents)
     research_by_agent = _research_decisions_by_agent(db)
 
     positions = db.scalars(
@@ -198,7 +215,7 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
                     order = _sell_position(
                         db,
                         adapter,
-                        settings,
+                        runtime_settings,
                         agent,
                         position,
                         'liberated-agent thesis exit',
@@ -220,7 +237,7 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
             order = _sell_position(
                 db,
                 adapter,
-                settings,
+                runtime_settings,
                 agent,
                 position,
                 'pick-shovel constrained exit',
@@ -235,7 +252,7 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         if exited or executed_orders >= max_orders:
             continue
 
-        slot_limit = _agent_slot_limit(settings, agent)
+        slot_limit = _agent_slot_limit(runtime_settings, agent)
         if len(agent_positions) >= slot_limit:
             continue
 
@@ -251,7 +268,7 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
             if decision.max_notional <= 0 or cash <= 0:
                 continue
             try:
-                quote = get_quote_record(settings, decision.symbol)
+                quote = get_quote_record(runtime_settings, decision.symbol)
                 price_hint = round(quote.ask_price or quote.last_price, 2)
             except Exception:
                 continue
@@ -268,7 +285,7 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
             order = submit_paper_order(
                 db,
                 adapter,
-                settings,
+                runtime_settings,
                 PaperOrderTicket(
                     symbol=decision.symbol,
                     agent_slug=agent.slug,

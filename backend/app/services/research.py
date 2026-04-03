@@ -845,7 +845,7 @@ def _candidate_max_notional(settings: Settings, agent: StrategyAgent, target_wei
 
 
 def _research_status_priority(status: str) -> int:
-    return {'research-buy': 2, 'research-hold': 1, 'research-avoid': 0}.get(status, 0)
+    return {'research-buy': 3, 'research-hold': 2, 'research-watch': 1, 'research-avoid': 0}.get(status, 0)
 
 
 def _candidate_target_weight(agent: StrategyAgent, conviction: float) -> float:
@@ -990,6 +990,24 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
             if row.idea.symbol in held_symbols and row.idea.status == 'research-hold' and row not in selected:
                 selected.append(row)
         decision_limit = max(settings.research_max_generated_decisions_per_agent, len(held_symbols) + 2)
+        fallback_target = min(decision_limit, max(2, len(held_symbols) + 1))
+        if len(selected) < fallback_target:
+            for row in evidence_rows:
+                if row in selected:
+                    continue
+                if row.idea.status == 'research-avoid':
+                    row.idea = CandidateIdea(
+                        symbol=row.idea.symbol,
+                        theme_name=row.idea.theme_name,
+                        target_weight=row.idea.target_weight,
+                        max_notional=row.idea.max_notional,
+                        conviction_score=row.idea.conviction_score,
+                        rationale=row.idea.rationale,
+                        status='research-watch',
+                    )
+                selected.append(row)
+                if len(selected) >= fallback_target:
+                    break
         selected = selected[:decision_limit]
 
         db.execute(delete(Decision).where(Decision.strategy_slug == agent.slug))

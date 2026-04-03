@@ -49,6 +49,23 @@ class QuoteResponse(BaseModel):
     update_time: str | None = None
 
 
+class AgentHistoryPointResponse(BaseModel):
+    equity: float
+    cash: float
+    return_pct: float
+    recorded_at: datetime
+
+
+class AgentCashPointResponse(BaseModel):
+    cash: float
+    recorded_at: datetime
+
+
+class AgentHoldingsPointResponse(BaseModel):
+    holdings: float
+    recorded_at: datetime
+
+
 class AgentResponse(BaseModel):
     slug: str
     name: str
@@ -83,6 +100,9 @@ class AgentResponse(BaseModel):
     death_round: int | None = None
     death_reason: str | None = None
     notes: str
+    history: list[AgentHistoryPointResponse] = Field(default_factory=list)
+    cash_history: list[AgentCashPointResponse] = Field(default_factory=list)
+    holdings_history: list[AgentHoldingsPointResponse] = Field(default_factory=list)
     updated_at: datetime
 
 

@@ -59,7 +59,11 @@ If you already started an older version of this scaffold, the runtime will renam
 ## Recent paper-trading results
 The screenshot below shows a recent paper-trading snapshot from the local agent arena.
 
-![Paper trading results](./papertrade.png)
+![Paper trading results](./output/images/papertrade.png)
+
+The arena can also push agents into aggressive catch-up behavior when one starts trailing. The screenshot below shows that competitive pressure more clearly: agents can rotate hard, stretch cash, and chase performance just to close the gap with the other side.
+
+![Competitive catch-up behavior](./output/images/pic2.png)
 
 ## moomoo setup
 1. Install and run `OpenD`.
@@ -105,7 +109,7 @@ Notes:
 - moomoo stays the broker for orders and account state; only quotes move to the external provider.
 
 ## Important notes
-- Live trading unlock is not enabled in the UI yet. The current order flow is intentionally paper-first.
+- `live_capped` is now wired for broker execution, but it only permits the `Pick-and-Shovel Growth` agent and uses the configured live capped order-size limit.
 - Both agents are limited to `US-listed stocks` only.
 - For US paper trading, the backend keeps `regular-hours only` and `limit orders only`.
 - moomoo symbols should be entered in API format such as `US.NVDA`.
@@ -117,11 +121,11 @@ Notes:
 
 
 ## Agent autopilot
-- The backend now supports a paper-only autopilot loop.
+- The backend now supports autopilot in `paper` and `live_capped` modes.
 - Use `POST /agents/cycle` to run one decision cycle manually.
 - Use `GET /agents/autopilot` and `POST /agents/autopilot` to inspect or toggle the background loop.
 - Use `POST /research/run` and `GET /research/notes` to refresh and inspect the live research evidence layer.
 - The liberated agent now refreshes its own research queue from live sources and exits when a held name falls out of the current thesis set.
 - The pick-and-shovel agent stays constrained to bottleneck names, while the liberated agent can generate fresh US-stock ideas from the live research pipeline.
-- Background autopilot only runs in `paper` mode for now.
+- In `live_capped`, autopilot only trades the `Pick-and-Shovel Growth` agent and uses the live broker environment/account configuration.
 

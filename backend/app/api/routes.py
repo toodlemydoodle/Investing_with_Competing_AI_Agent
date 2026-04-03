@@ -19,8 +19,11 @@ from app.models.entities import BrokerOrder
 from app.models.entities import Company
 from app.models.entities import Decision
 from app.models.entities import Position
+from app.schemas.api import AgentCashPointResponse
+from app.schemas.api import AgentHoldingsPointResponse
 from app.schemas.api import AgentPositionResponse
 from app.schemas.api import AgentResponse
+from app.schemas.api import AgentHistoryPointResponse
 from app.schemas.api import AgentTradeResponse
 from app.schemas.api import AlertResponse
 from app.schemas.api import AutopilotCycleResponse
@@ -46,9 +49,14 @@ from app.services.research import refresh_live_research
 from app.services.trading import bootstrap_database
 from app.services.trading import build_broker_adapter
 from app.services.trading import get_active_mode
+from app.services.trading import get_agent_cash_history
+from app.services.trading import get_agent_history
+from app.services.trading import get_agent_holdings_history
 from app.services.trading import get_agent_positions
 from app.services.trading import get_competition_benchmark_state
 from app.services.trading import get_agent_trades
+from app.services.trading import get_live_capped_agent_slug
+from app.services.trading import get_runtime_settings
 from app.services.trading import get_selected_account_id
 from app.services.trading import get_strategy_agents
 from app.services.trading import refresh_broker_state
@@ -75,15 +83,17 @@ def map_health(settings: Settings, db: Session) -> HealthResponse:
     )
 
 
-def map_broker_health(settings: Settings) -> BrokerHealthResponse:
-    adapter = build_broker_adapter(settings)
+def map_broker_health(settings: Settings, db: Session) -> BrokerHealthResponse:
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     health = adapter.health_check()
     return BrokerHealthResponse(**asdict(health))
 
 
 def map_dashboard_broker_health(settings: Settings, db: Session) -> BrokerHealthResponse:
-    if settings.broker_backend.lower() == 'mock':
-        return map_broker_health(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    if runtime_settings.broker_backend.lower() == 'mock':
+        return map_broker_health(settings, db)
 
     accounts = db.scalars(select(BrokerAccount).order_by(BrokerAccount.updated_at.desc())).all()
     selected_acc_id = get_selected_account_id(db, settings)
@@ -109,7 +119,7 @@ def map_dashboard_broker_health(settings: Settings, db: Session) -> BrokerHealth
         message=message,
         is_reachable=is_reachable,
         is_authenticated=is_authenticated,
-        environment=settings.moomoo_trd_env,
+        environment=runtime_settings.moomoo_trd_env,
         selected_acc_id=selected_acc_id,
         warnings=warnings,
         account_summary={},
@@ -118,13 +128,14 @@ def map_dashboard_broker_health(settings: Settings, db: Session) -> BrokerHealth
 
 
 def map_settings(settings: Settings, db: Session) -> SettingsResponse:
+    runtime_settings = get_runtime_settings(db, settings)
     autopilot = get_autopilot_status(db, settings)
     benchmark = get_competition_benchmark_state(db, settings, refresh=False)
     return SettingsResponse(
         app_mode=get_active_mode(db, settings),
         broker_backend=settings.broker_backend,
         quote_provider=settings.quote_provider,
-        broker_environment=settings.moomoo_trd_env,
+        broker_environment=runtime_settings.moomoo_trd_env,
         selected_acc_id=get_selected_account_id(db, settings),
         agent_autopilot_enabled=bool(autopilot['enabled']),
         agent_autopilot_interval_seconds=settings.agent_autopilot_interval_seconds,
@@ -145,11 +156,19 @@ def map_settings(settings: Settings, db: Session) -> SettingsResponse:
         research_min_buy_score=settings.research_min_buy_score,
         research_min_hold_score=settings.research_min_hold_score,
         risk_bankroll_cap=settings.risk_bankroll_cap,
-        risk_max_order_notional=settings.risk_max_order_notional,
+        risk_max_order_notional=runtime_settings.risk_max_order_notional,
         risk_max_open_positions=settings.risk_max_open_positions,
         risk_max_positions_per_theme=settings.risk_max_positions_per_theme,
         risk_daily_loss_limit=settings.risk_daily_loss_limit,
     )
+
+
+def map_agent(agent, db: Session) -> AgentResponse:
+    base = AgentResponse.model_validate(agent, from_attributes=True)
+    history = [AgentHistoryPointResponse.model_validate(point) for point in get_agent_history(db, agent.slug)]
+    cash_history = [AgentCashPointResponse.model_validate(point) for point in get_agent_cash_history(db, agent)]
+    holdings_history = [AgentHoldingsPointResponse.model_validate(point) for point in get_agent_holdings_history(db, agent)]
+    return base.model_copy(update={'history': history, 'cash_history': cash_history, 'holdings_history': holdings_history})
 
 
 @router.get('/health', response_model=HealthResponse)
@@ -159,8 +178,9 @@ def get_health(db: Session = Depends(get_db), settings: Settings = Depends(get_s
 
 
 @router.get('/broker/health', response_model=BrokerHealthResponse)
-def get_broker_health(settings: Settings = Depends(get_settings)) -> BrokerHealthResponse:
-    return map_broker_health(settings)
+def get_broker_health(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> BrokerHealthResponse:
+    bootstrap_database(db, settings)
+    return map_broker_health(settings, db)
 
 
 @router.get('/broker/accounts', response_model=list[BrokerAccountResponse])
@@ -168,7 +188,8 @@ def get_broker_accounts(
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> list[BrokerAccountResponse]:
     bootstrap_database(db, settings)
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     try:
         accounts = sync_broker_accounts(db, adapter)
     except Exception as exc:
@@ -206,7 +227,7 @@ def get_quote(symbol: str, settings: Settings = Depends(get_settings)) -> QuoteR
 def get_agents(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> list[AgentResponse]:
     bootstrap_database(db, settings)
     agents = get_strategy_agents(db, settings)
-    return [AgentResponse.model_validate(agent, from_attributes=True) for agent in agents]
+    return [map_agent(agent, db) for agent in agents]
 
 
 @router.get('/sleeves', response_model=list[AgentResponse])
@@ -261,8 +282,12 @@ def post_research_run(
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> ResearchRefreshResponse:
     bootstrap_database(db, settings)
+    runtime_settings = get_runtime_settings(db, settings)
     agents = get_strategy_agents(db, settings)
-    generated = refresh_live_research(db, settings, agents=agents)
+    if get_active_mode(db, settings) == 'live_capped':
+        allowed_slug = get_live_capped_agent_slug(runtime_settings)
+        agents = [agent for agent in agents if agent.slug == allowed_slug]
+    generated = refresh_live_research(db, runtime_settings, agents=agents)
     decisions = db.scalars(select(Decision)).all()
     notes = get_research_notes(db, limit=500)
     return ResearchRefreshResponse(
@@ -278,7 +303,8 @@ def post_broker_test(
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> DashboardOverviewResponse:
     bootstrap_database(db, settings)
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     try:
         refresh_broker_state(db, adapter, settings)
     except Exception as exc:
@@ -322,7 +348,8 @@ def get_positions(
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> list[PositionResponse]:
     bootstrap_database(db, settings)
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     try:
         positions = sync_positions(db, adapter)
         refresh_strategy_game_state(db, settings)
@@ -336,7 +363,8 @@ def get_orders(
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> list[BrokerOrderResponse]:
     bootstrap_database(db, settings)
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     try:
         orders = sync_orders(db, adapter)
     except Exception as exc:
@@ -351,7 +379,8 @@ def post_paper_order(
     settings: Settings = Depends(get_settings),
 ) -> BrokerOrderResponse:
     bootstrap_database(db, settings)
-    adapter = build_broker_adapter(settings)
+    runtime_settings = get_runtime_settings(db, settings)
+    adapter = build_broker_adapter(runtime_settings)
     ticket = PaperOrderTicket(
         symbol=payload.symbol.strip().upper(),
         agent_slug=payload.agent_slug,
@@ -361,7 +390,7 @@ def post_paper_order(
         remark=payload.remark,
     )
     try:
-        order = submit_paper_order(db, adapter, settings, ticket)
+        order = submit_paper_order(db, adapter, runtime_settings, ticket)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -431,7 +460,7 @@ def get_dashboard_overview(
         health=map_health(settings, db),
         broker_health=map_dashboard_broker_health(settings, db),
         accounts=[BrokerAccountResponse.model_validate(account, from_attributes=True) for account in accounts],
-        agents=[AgentResponse.model_validate(agent, from_attributes=True) for agent in agents],
+        agents=[map_agent(agent, db) for agent in agents],
         agent_positions=[AgentPositionResponse.model_validate(position, from_attributes=True) for position in agent_positions],
         agent_trades=[AgentTradeResponse.model_validate(trade, from_attributes=True) for trade in agent_trades],
         research_notes=[ResearchNoteResponse.model_validate(note, from_attributes=True) for note in research_notes],

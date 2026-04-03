@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     moomoo_market: str = 'US'
     moomoo_trd_env: str = 'SIMULATE'
     moomoo_acc_id: int | None = None
+    moomoo_paper_trd_env: str = 'SIMULATE'
+    moomoo_paper_acc_id: int | None = None
+    moomoo_live_trd_env: str = 'REAL'
+    moomoo_live_acc_id: int | None = None
     moomoo_unlock_password: str | None = None
 
     alpaca_data_api_key: str | None = None
@@ -67,6 +71,8 @@ class Settings(BaseSettings):
 
     risk_bankroll_cap: float = 1000.0
     risk_max_order_notional: float = 150.0
+    live_capped_max_order_notional: float = 25.0
+    live_capped_agent_slug: str = 'pick-shovel-growth'
     risk_max_open_positions: int = 5
     risk_max_positions_per_theme: int = 2
     risk_daily_loss_limit: float = 75.0
@@ -101,6 +107,8 @@ class Settings(BaseSettings):
 
     @field_validator(
         'moomoo_acc_id',
+        'moomoo_paper_acc_id',
+        'moomoo_live_acc_id',
         'moomoo_unlock_password',
         'alpaca_data_api_key',
         'alpaca_data_secret',

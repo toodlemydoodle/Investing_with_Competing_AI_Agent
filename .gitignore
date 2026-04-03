@@ -12,6 +12,10 @@ node_modules/
 dist/
 build/
 output/
+!output/
+output/*
+!output/images/
+!output/images/*.png
 tmp/
 .env
 backend/.env

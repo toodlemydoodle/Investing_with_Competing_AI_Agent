@@ -39,6 +39,11 @@ BENCHMARK_HISTORY_KEY = 'competition_benchmark_history'
 BENCHMARK_START_AT_KEY = 'competition_benchmark_start_at'
 BENCHMARK_HISTORY_LIMIT = 288
 BENCHMARK_HISTORY_MIN_INTERVAL_SECONDS = 240
+AGENT_HISTORY_KEY_PREFIX = 'agent_history::'
+AGENT_HISTORY_LIMIT = 432
+AGENT_HISTORY_MIN_INTERVAL_SECONDS = 240
+AGENT_CASH_HISTORY_LIMIT = 720
+AGENT_HOLDINGS_HISTORY_LIMIT = 720
 _ADAPTER_CACHE_LOCK = Lock()
 _ADAPTER_CACHE: dict[tuple[object, ...], BrokerAdapter] = {}
 
@@ -227,8 +232,34 @@ def get_active_mode(db: Session, settings: Settings) -> str:
     return get_setting_value(db, 'app_mode', settings.app_mode)
 
 
+def get_runtime_settings(db: Session, settings: Settings) -> Settings:
+    mode = get_active_mode(db, settings)
+    updates: dict[str, object] = {}
+
+    if settings.broker_backend.lower() == 'moomoo':
+        if mode == 'live_capped':
+            updates['moomoo_trd_env'] = settings.moomoo_live_trd_env
+            updates['moomoo_acc_id'] = settings.moomoo_live_acc_id
+        else:
+            updates['moomoo_trd_env'] = settings.moomoo_paper_trd_env
+            updates['moomoo_acc_id'] = settings.moomoo_paper_acc_id if settings.moomoo_paper_acc_id is not None else settings.moomoo_acc_id
+
+    if mode == 'live_capped':
+        updates['risk_max_order_notional'] = min(settings.risk_max_order_notional, settings.live_capped_max_order_notional)
+
+    return settings.model_copy(update=updates) if updates else settings
+
+
+def get_live_capped_agent_slug(settings: Settings) -> str:
+    slug = str(settings.live_capped_agent_slug or '').strip()
+    return slug or 'pick-shovel-growth'
+
+
 def get_selected_account_id(db: Session, settings: Settings) -> int | None:
-    raw = get_setting_value(db, 'selected_acc_id', str(settings.moomoo_acc_id or ''))
+    runtime_settings = get_runtime_settings(db, settings)
+    if runtime_settings.moomoo_acc_id is not None:
+        return int(runtime_settings.moomoo_acc_id)
+    raw = get_setting_value(db, 'selected_acc_id', '')
     if not raw:
         return None
     try:
@@ -441,6 +472,92 @@ def _append_competition_benchmark_history(db: Session, price: float, recorded_at
     return history
 
 
+def _agent_history_key(agent_slug: str) -> str:
+    return f'{AGENT_HISTORY_KEY_PREFIX}{agent_slug}'
+
+
+def _load_agent_history(db: Session, agent_slug: str) -> list[dict[str, object]]:
+    raw = get_setting_value(db, _agent_history_key(agent_slug), '[]')
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    points: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        recorded_at = _parse_datetime_setting(str(item.get('recorded_at') or ''))
+        if recorded_at is None:
+            continue
+        try:
+            equity = round(float(item.get('equity')), 2)
+            cash = round(float(item.get('cash')), 2)
+            return_pct = round(float(item.get('return_pct')), 2)
+        except (TypeError, ValueError):
+            continue
+        points.append({
+            'equity': equity,
+            'cash': cash,
+            'return_pct': return_pct,
+            'recorded_at': recorded_at,
+        })
+
+    points.sort(key=lambda point: point['recorded_at'])
+    return points[-AGENT_HISTORY_LIMIT:]
+
+
+def _store_agent_history(db: Session, agent_slug: str, points: list[dict[str, object]]) -> None:
+    payload = [
+        {
+            'equity': round(float(point['equity']), 2),
+            'cash': round(float(point['cash']), 2),
+            'return_pct': round(float(point['return_pct']), 2),
+            'recorded_at': point['recorded_at'].isoformat(),
+        }
+        for point in points[-AGENT_HISTORY_LIMIT:]
+        if isinstance(point.get('recorded_at'), datetime)
+    ]
+    set_setting_value(db, _agent_history_key(agent_slug), json.dumps(payload))
+
+
+def _append_agent_history_point(db: Session, agent: StrategyAgent, recorded_at: datetime) -> list[dict[str, object]]:
+    point = {
+        'equity': round(float(agent.current_value), 2),
+        'cash': round(float(agent.cash_buffer), 2),
+        'return_pct': round(float(agent.total_return_pct), 2),
+        'recorded_at': recorded_at,
+    }
+    history = _load_agent_history(db, agent.slug)
+    if not history:
+        history = [point]
+    else:
+        last = history[-1]
+        age_seconds = (recorded_at - last['recorded_at']).total_seconds()
+        same_values = (
+            abs(float(last['equity']) - point['equity']) < EPSILON
+            and abs(float(last['cash']) - point['cash']) < EPSILON
+            and abs(float(last['return_pct']) - point['return_pct']) < EPSILON
+        )
+        if age_seconds <= 0 or age_seconds < AGENT_HISTORY_MIN_INTERVAL_SECONDS:
+            history[-1] = point
+        elif same_values:
+            return history
+        else:
+            history.append(point)
+
+    history.sort(key=lambda item: item['recorded_at'])
+    history = history[-AGENT_HISTORY_LIMIT:]
+    _store_agent_history(db, agent.slug, history)
+    return history
+
+
+def get_agent_history(db: Session, agent_slug: str) -> list[dict[str, object]]:
+    return _load_agent_history(db, agent_slug)
+
+
 def get_competition_benchmark_state(
     db: Session,
     settings: Settings,
@@ -571,6 +688,102 @@ def get_agent_cash(db: Session, agent: StrategyAgent) -> float:
         elif trade.side == 'SELL':
             cash += trade.notional
     return round(cash, 2)
+
+
+def get_agent_cash_history(db: Session, agent: StrategyAgent) -> list[dict[str, object]]:
+    trades = db.scalars(
+        select(AgentTrade)
+        .where(AgentTrade.agent_slug == agent.slug)
+        .order_by(AgentTrade.created_at.asc(), AgentTrade.id.asc())
+    ).all()
+    cash = float(agent.starting_capital)
+    points: list[dict[str, object]] = []
+
+    for trade in trades:
+        if trade.side == 'BUY':
+            cash -= trade.notional
+        elif trade.side == 'SELL':
+            cash += trade.notional
+        points.append({
+            'cash': round(cash, 2),
+            'recorded_at': trade.created_at,
+        })
+
+    current_cash = round(float(agent.cash_buffer), 2)
+    current_at = agent.updated_at or (points[-1]['recorded_at'] if points else datetime.utcnow())
+
+    if not points:
+        return [{
+            'cash': current_cash,
+            'recorded_at': current_at,
+        }]
+
+    last = points[-1]
+    if abs(float(last['cash']) - current_cash) > EPSILON or current_at > last['recorded_at']:
+        points.append({
+            'cash': current_cash,
+            'recorded_at': current_at,
+        })
+
+    return points[-AGENT_CASH_HISTORY_LIMIT:]
+
+
+def get_agent_holdings_history(db: Session, agent: StrategyAgent) -> list[dict[str, object]]:
+    trades = db.scalars(
+        select(AgentTrade)
+        .where(AgentTrade.agent_slug == agent.slug)
+        .order_by(AgentTrade.created_at.asc(), AgentTrade.id.asc())
+    ).all()
+    positions: dict[str, dict[str, float]] = {}
+    points: list[dict[str, object]] = []
+
+    for trade in trades:
+        symbol = trade.symbol
+        quantity = round(float(trade.quantity), 6)
+        price = round(float(trade.price), 4)
+        position = positions.setdefault(symbol, {'quantity': 0.0, 'average_cost': 0.0})
+
+        if trade.side == 'BUY':
+            new_quantity = position['quantity'] + quantity
+            total_cost = (position['quantity'] * position['average_cost']) + (quantity * price)
+            position['quantity'] = new_quantity
+            position['average_cost'] = total_cost / new_quantity if new_quantity > EPSILON else 0.0
+        elif trade.side == 'SELL':
+            remaining_quantity = max(position['quantity'] - quantity, 0.0)
+            position['quantity'] = remaining_quantity
+            if remaining_quantity <= EPSILON:
+                position['average_cost'] = 0.0
+
+        holdings_value = round(
+            sum(
+                item['quantity'] * item['average_cost']
+                for item in positions.values()
+                if item['quantity'] > EPSILON
+            ),
+            2,
+        )
+        points.append({
+            'holdings': holdings_value,
+            'recorded_at': trade.created_at,
+        })
+
+    current_holdings = round(max(float(agent.current_value) - float(agent.cash_buffer), 0.0), 2)
+    current_at = agent.updated_at or (points[-1]['recorded_at'] if points else datetime.utcnow())
+
+    if not points:
+        return [{
+            'holdings': current_holdings,
+            'recorded_at': current_at,
+        }]
+
+    last = points[-1]
+    if abs(float(last['holdings']) - current_holdings) > EPSILON or current_at > last['recorded_at']:
+        points.append({
+            'holdings': current_holdings,
+            'recorded_at': current_at,
+        })
+
+    return points[-AGENT_HOLDINGS_HISTORY_LIMIT:]
 
 
 def get_latest_symbol_price(db: Session, symbol: str, fallback: float) -> float:
@@ -862,6 +1075,8 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
             )
 
     agents = rebalance_strategy_agents(db, settings, commit=False)
+    for agent in agents:
+        _append_agent_history_point(db, agent, now)
     if commit:
         db.commit()
     return agents
@@ -1258,8 +1473,11 @@ def refresh_broker_state(db: Session, adapter: BrokerAdapter, settings: Settings
 
 
 def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, ticket: PaperOrderTicket) -> BrokerOrder:
-    if get_active_mode(db, settings) == 'paused':
-        raise ValueError('App mode is paused. Switch to paper mode before submitting orders.')
+    mode = get_active_mode(db, settings)
+    if mode == 'paused':
+        raise ValueError('App mode is paused. Switch to paper or live capped before submitting orders.')
+    if mode not in {'paper', 'live_capped'}:
+        raise ValueError(f'Unsupported app mode `{mode}` for order submission.')
 
     symbol = ticket.symbol.strip().upper()
     if not symbol.startswith(US_STOCK_PREFIX):
@@ -1272,6 +1490,14 @@ def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, 
         raise ValueError(f'Unknown agent `{ticket.agent_slug}`.')
     if not agent.is_alive:
         raise ValueError(f'Agent `{agent.name}` has already lost and can no longer trade.')
+    if mode == 'live_capped':
+        allowed_slug = get_live_capped_agent_slug(settings)
+        if ticket.agent_slug != allowed_slug:
+            allowed_agent = db.get(StrategyAgent, allowed_slug)
+            allowed_name = allowed_agent.name if allowed_agent is not None else allowed_slug
+            raise ValueError(f'Live capped mode only allows orders for `{allowed_name}`.')
+        if settings.broker_backend.lower() == 'moomoo' and settings.moomoo_trd_env != 'REAL':
+            raise ValueError('Live capped mode requires MOOMOO_LIVE_TRD_ENV=REAL.')
     if ticket.quantity * ticket.limit_price > settings.risk_max_order_notional:
         raise ValueError(
             f'Order notional exceeds max per-order limit of ${settings.risk_max_order_notional:.2f}.'
