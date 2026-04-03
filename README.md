@@ -61,7 +61,7 @@ The screenshot below shows a recent paper-trading snapshot from the local agent 
 
 ![Paper trading results](./output/images/papertrade.png)
 
-The arena can also push agents into aggressive catch-up behavior when one starts trailing. The screenshot below shows that competitive pressure more clearly: agents can rotate hard, stretch cash, and chase performance just to close the gap with the other side.
+The arena can also push agents into aggressive catch-up behavior when one starts trailing. The screenshot below shows that competitive pressure more clearly: One agent started to borrow more than 100% cash to buy more stocks. Once it caught up, it sold off the stocks.
 
 ![Competitive catch-up behavior](./output/images/pic2.png)
 
