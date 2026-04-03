@@ -61,7 +61,7 @@ The screenshot below shows only 1 agent that was given very little safe guards t
 
 ![Paper trading results](./output/images/papertrade.png)
 
-The arena can also push agents into aggressive catch-up behavior when one starts trailing. The screenshot below shows that competitive pressure more clearly: One agent started to borrow more than 100% cash to buy more stocks. Once it caught up, it sold off the stocks.
+The arena can also push agents into aggressive catch-up behavior when one starts trailing. The screenshot below shows that pressure more clearly: one agent drove its local cash balance deeply negative to buy more stocks, then sold them off after catching up.
 
 ![Competitive catch-up behavior](./output/images/pic2.png)
 
