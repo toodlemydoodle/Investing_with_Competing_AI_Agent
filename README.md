@@ -57,7 +57,7 @@ If you already started an older version of this scaffold, the runtime will renam
 - Backend docs: `http://localhost:8000/docs`
 
 ## Recent paper-trading results
-The three-week check-in below compares the model against the S&P 500 benchmark. After three weeks, the model was ahead by `9.3%`.
+The three-week check-in below compares the model against the S&P 500 benchmark. After three weeks, the model was ahead by `8.3%`.
 
 ![Three-week model vs S&P 500 check-in](./output/images/3week-checkin.jpg)
 
