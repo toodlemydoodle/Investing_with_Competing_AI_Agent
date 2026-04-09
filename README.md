@@ -57,6 +57,10 @@ If you already started an older version of this scaffold, the runtime will renam
 - Backend docs: `http://localhost:8000/docs`
 
 ## Recent paper-trading results
+The three-week check-in below compares the model against the S&P 500 benchmark. After three weeks, the model was ahead by `9.3%`.
+
+![Three-week model vs S&P 500 check-in](./output/images/3week-checkin.jpg)
+
 The screenshot below shows only 1 agent that was given very little safe guards to do it's own investment. This was over the course of 2 weeks. The agent had close to 600% return.
 
 ![Paper trading results](./output/images/papertrade.png)
