@@ -1,7 +1,12 @@
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const REQUEST_TIMEOUT_MS = 8000;
 const ADMIN_TOKEN_STORAGE_KEY = 'arenaAdminToken';
+const DASHBOARD_STREAM_URL = '/dashboard/stream';
 let latestOverviewData = null;
+let dashboardStream = null;
+let latestDashboardStreamRevision = -1;
+let silentRefreshInFlight = false;
+let silentRefreshQueued = false;
 
 function getAdminToken() {
   try {
@@ -149,6 +154,84 @@ async function request(path, init) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function parseDashboardStreamPayload(event) {
+  if (!event || typeof event.data !== 'string') {
+    return null;
+  }
+  try {
+    return JSON.parse(event.data);
+  } catch {
+    return null;
+  }
+}
+
+async function refreshOverviewSilently() {
+  if (silentRefreshInFlight) {
+    silentRefreshQueued = true;
+    return;
+  }
+
+  silentRefreshInFlight = true;
+  try {
+    do {
+      silentRefreshQueued = false;
+      try {
+        await refreshOverview();
+      } catch (error) {
+        console.warn('Dashboard stream refresh failed.', error);
+      }
+    } while (silentRefreshQueued);
+  } finally {
+    silentRefreshInFlight = false;
+  }
+}
+
+function closeDashboardStream() {
+  if (dashboardStream) {
+    dashboardStream.close();
+    dashboardStream = null;
+  }
+}
+
+function connectDashboardStream() {
+  if (dashboardStream || typeof EventSource === 'undefined') {
+    return;
+  }
+
+  const stream = new EventSource(DASHBOARD_STREAM_URL);
+  dashboardStream = stream;
+
+  stream.addEventListener('ready', (event) => {
+    const payload = parseDashboardStreamPayload(event);
+    const revision = Number(payload?.revision);
+    if (Number.isFinite(revision)) {
+      latestDashboardStreamRevision = revision;
+    }
+  });
+
+  stream.addEventListener('dashboard', (event) => {
+    const payload = parseDashboardStreamPayload(event);
+    const revision = Number(payload?.revision);
+    if (Number.isFinite(revision) && revision <= latestDashboardStreamRevision) {
+      return;
+    }
+    if (Number.isFinite(revision)) {
+      latestDashboardStreamRevision = revision;
+    }
+    void refreshOverviewSilently();
+  });
+
+  stream.onerror = () => {
+    if (dashboardStream !== stream) {
+      return;
+    }
+    if (stream.readyState === EventSource.CLOSED) {
+      closeDashboardStream();
+      window.setTimeout(connectDashboardStream, 3000);
+    }
+  };
 }
 
 function showMessage(kind, text) {
@@ -1308,6 +1391,7 @@ async function init() {
 
   try {
     await refreshOverview();
+    connectDashboardStream();
   } catch (error) {
     showMessage('error', error.message || 'Dashboard load failed.');
   }

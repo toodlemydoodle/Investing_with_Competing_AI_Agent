@@ -18,6 +18,7 @@ from app.db.session import Base
 from app.db.session import SessionLocal
 from app.db.session import engine
 from app.models.entities import Alert
+from app.services.dashboard_stream import mark_dashboard_state_updated
 from app.services.trading import bootstrap_database
 from app.services.trading import close_broker_adapters
 from app.services.trading import set_setting_value
@@ -61,12 +62,14 @@ def _pause_autopilot_for_broker_failure(error_message: str) -> None:
             existing.is_active = True
             existing.updated_at = datetime.utcnow()
         db.commit()
+    mark_dashboard_state_updated('autopilot-paused')
 
 
 def _run_autopilot_iteration(settings) -> None:
     with SessionLocal() as db:
         if get_autopilot_enabled(db, settings):
             run_agent_autopilot_cycle(db, settings)
+            mark_dashboard_state_updated('autopilot-cycle')
 
 
 @asynccontextmanager
@@ -76,6 +79,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         bootstrap_database(db, settings)
+    mark_dashboard_state_updated('startup')
 
     async def autopilot_loop() -> None:
         interval_seconds = max(30, settings.agent_autopilot_interval_seconds)

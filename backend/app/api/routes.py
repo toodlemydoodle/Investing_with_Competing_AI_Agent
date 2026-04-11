@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
+import json
 from datetime import datetime
 from secrets import compare_digest
 
@@ -8,6 +10,7 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -46,6 +49,8 @@ from app.schemas.api import QuoteResponse
 from app.schemas.api import ResearchNoteResponse
 from app.schemas.api import ResearchRefreshResponse
 from app.schemas.api import SettingsResponse
+from app.services.dashboard_stream import get_dashboard_stream_state
+from app.services.dashboard_stream import mark_dashboard_state_updated
 from app.services.quotes import get_quote_record
 from app.services.research import get_research_notes
 from app.services.research import refresh_live_research
@@ -82,6 +87,8 @@ from app.strategy.engine import set_autopilot_enabled
 router = APIRouter()
 ADMIN_HEADER_NAME = 'x-admin-token'
 LOCAL_ADMIN_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+STREAM_POLL_INTERVAL_SECONDS = 1.0
+STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 def _request_hostname(request: Request) -> str:
@@ -111,6 +118,10 @@ def _require_admin_request(request: Request, settings: Settings) -> None:
         status_code=403,
         detail='Admin controls are locked. Unlock the dashboard with the admin token to use this action.',
     )
+
+
+def _format_sse(event: str, payload: dict[str, object]) -> str:
+    return f'event: {event}\ndata: {json.dumps(payload)}\n\n'
 
 
 def map_health(settings: Settings, db: Session) -> HealthResponse:
@@ -232,6 +243,36 @@ def get_health(db: Session = Depends(get_db), settings: Settings = Depends(get_s
     return map_health(settings, db)
 
 
+@router.get('/dashboard/stream')
+async def get_dashboard_stream(request: Request) -> StreamingResponse:
+    async def event_stream():
+        snapshot = get_dashboard_stream_state()
+        last_revision = int(snapshot['revision'])
+        last_heartbeat_at = asyncio.get_running_loop().time()
+        yield _format_sse('ready', snapshot)
+
+        while True:
+            if await request.is_disconnected():
+                break
+            current = get_dashboard_stream_state()
+            current_revision = int(current['revision'])
+            if current_revision != last_revision:
+                yield _format_sse('dashboard', current)
+                last_revision = current_revision
+                last_heartbeat_at = asyncio.get_running_loop().time()
+            elif asyncio.get_running_loop().time() - last_heartbeat_at >= STREAM_HEARTBEAT_INTERVAL_SECONDS:
+                yield ': keep-alive\n\n'
+                last_heartbeat_at = asyncio.get_running_loop().time()
+            await asyncio.sleep(STREAM_POLL_INTERVAL_SECONDS)
+
+    headers = {
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+    }
+    return StreamingResponse(event_stream(), media_type='text/event-stream', headers=headers)
+
+
 @router.get('/broker/health', response_model=BrokerHealthResponse)
 def get_broker_health(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> BrokerHealthResponse:
     bootstrap_database(db, settings)
@@ -348,6 +389,7 @@ def post_research_run(
     runtime_settings = get_runtime_settings(db, settings)
     agents = get_strategy_agents(db, settings)
     generated = refresh_live_research(db, runtime_settings, agents=agents)
+    mark_dashboard_state_updated('research-refresh')
     decisions = db.scalars(select(Decision)).all()
     notes = get_research_notes(db, limit=500)
     return ResearchRefreshResponse(
@@ -371,6 +413,7 @@ def post_broker_test(
         refresh_broker_state(db, adapter, settings)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    mark_dashboard_state_updated('broker-sync')
     return get_dashboard_overview(request, db, settings)
 
 
@@ -391,6 +434,7 @@ def post_agents_autopilot(
     _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     set_autopilot_enabled(db, payload.enabled)
+    mark_dashboard_state_updated('autopilot-toggle')
     return AutopilotStatusResponse(**get_autopilot_status(db, settings))
 
 
@@ -406,6 +450,7 @@ def post_agents_cycle(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    mark_dashboard_state_updated('autopilot-cycle')
     return AutopilotCycleResponse(**result)
 
 
@@ -424,6 +469,7 @@ def post_agent_bonus(
         db.commit()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    mark_dashboard_state_updated('agent-bonus')
     return get_dashboard_overview(request, db, settings)
 
 
@@ -481,6 +527,7 @@ def post_paper_order(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    mark_dashboard_state_updated('paper-order')
     return BrokerOrderResponse.model_validate(order, from_attributes=True)
 
 
@@ -527,6 +574,7 @@ def post_mode(
         raise HTTPException(status_code=400, detail=f'Mode must be one of {sorted(valid_modes)}')
     set_setting_value(db, 'app_mode', payload.mode)
     db.commit()
+    mark_dashboard_state_updated('mode-change')
     return map_settings(settings, db, request=request)
 
 
