@@ -56,6 +56,35 @@ If you already started an older version of this scaffold, the runtime will renam
 - Embedded agent arena: `http://localhost:8000`
 - Backend docs: `http://localhost:8000/docs`
 
+### Private remote access via Cloudflare
+To keep the dashboard private while reaching it remotely, use a Cloudflare Tunnel plus Cloudflare Access in front of the local app.
+
+Live follow link:
+- Public read-only arena dashboard: `https://arena.merrychristmasju.online`
+
+Quick path:
+```powershell
+.\scripts\run-backend.ps1
+.\scripts\run-cloudflare-tunnel.ps1
+```
+
+The tunnel launcher auto-detects `cloudflared` from `PATH` or the usual Windows install folders.
+
+Or launch both together:
+```powershell
+.\scripts\run-remote-ui.ps1
+```
+
+Full setup notes are in [docs/cloudflare-private-access.md](./docs/cloudflare-private-access.md).
+
+The Cloudflare helper scripts now load `backend/.env`, so you can keep values like `CLOUDFLARE_TUNNEL_TOKEN`, `CLOUDFLARE_PUBLIC_HOSTNAME`, and `CLOUDFLARE_BACKEND_HEALTH_URL` there and change them as needed.
+
+If you want the remote dashboard publicly viewable but read-only, set `DASHBOARD_ADMIN_TOKEN` in `backend/.env`. Public visitors can still load the dashboard, but write actions such as autopilot, mode changes, broker sync, research refresh, manual orders, and cash awards stay locked behind that admin token.
+
+Current setup:
+- `http://127.0.0.1:8000` stays trusted for local admin use
+- `https://arena.merrychristmasju.online` is the public read-only dashboard
+
 ## Recent paper-trading results
 The three-week check-in below compares the model against the S&P 500 benchmark. After three weeks, the model was ahead by `8.3%`.
 
@@ -113,11 +142,11 @@ Notes:
 - moomoo stays the broker for orders and account state; only quotes move to the external provider.
 
 ## Important notes
-- `live_capped` is now wired for broker execution, but it only permits the `Pick-and-Shovel Growth` agent and uses the configured live capped order-size limit.
+- `live_capped` is wired for broker execution for both agents and uses the configured live capped order-size limit.
 - Both agents are limited to `US-listed stocks` only.
 - For US paper trading, the backend keeps `regular-hours only` and `limit orders only`.
 - moomoo symbols should be entered in API format such as `US.NVDA`.
-- Agent competition is tracked in a local agent ledger using current mark-to-market plus a cached `US.SPY` benchmark race. After the warm-up window, trailing the benchmark is losing the game. Broker custody and broker positions are still commingled in one moomoo account.
+- Agent competition is tracked in a local agent ledger using current mark-to-market plus a cached `US.SPY` benchmark race. In `paper`, trailing the benchmark after the warm-up can eliminate an agent. In `live_capped`, trailing a monthly benchmark check forces that agent into cash-only mode instead. Broker custody and broker positions are still commingled in one moomoo account.
 - In `mock` mode, paper orders are filled immediately so the agent game updates end to end.
 - In `moomoo` mode, the runtime syncs recent order history so filled paper orders can be reflected in the agent ledger even when they are no longer open orders.
 
@@ -131,5 +160,5 @@ Notes:
 - Use `POST /research/run` and `GET /research/notes` to refresh and inspect the live research evidence layer.
 - The liberated agent now refreshes its own research queue from live sources and exits when a held name falls out of the current thesis set.
 - The pick-and-shovel agent stays constrained to bottleneck names, while the liberated agent can generate fresh US-stock ideas from the live research pipeline.
-- In `live_capped`, autopilot only trades the `Pick-and-Shovel Growth` agent and uses the live broker environment/account configuration.
+- In `live_capped`, autopilot can trade both agents and uses the live broker environment/account configuration.
 

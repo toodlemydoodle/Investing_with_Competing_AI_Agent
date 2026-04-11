@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     alpaca_data_secret: str | None = None
     alpaca_data_feed: str = 'iex'
     twelvedata_api_key: str | None = None
+    dashboard_admin_token: str | None = None
 
     agent_autopilot_enabled: bool = False
     agent_autopilot_interval_seconds: int = 300
@@ -113,6 +114,7 @@ class Settings(BaseSettings):
         'alpaca_data_api_key',
         'alpaca_data_secret',
         'twelvedata_api_key',
+        'dashboard_admin_token',
         mode='before',
     )
     @classmethod

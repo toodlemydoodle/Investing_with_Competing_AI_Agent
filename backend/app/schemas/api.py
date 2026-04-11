@@ -93,6 +93,12 @@ class AgentResponse(BaseModel):
     rolling_net_pnl: float
     is_eligible_for_elimination: bool
     elimination_ready_at: datetime | None = None
+    benchmark_warmup_ends_at: datetime | None = None
+    next_benchmark_check_at: datetime | None = None
+    benchmark_check_due: bool = False
+    is_cash_only: bool = False
+    cash_only_reason: str | None = None
+    cash_only_at: datetime | None = None
     last_scored_at: datetime | None = None
     is_winner: bool
     is_alive: bool
@@ -212,6 +218,8 @@ class BenchmarkPointResponse(BaseModel):
 
 class SettingsResponse(BaseModel):
     app_mode: str
+    admin_controls_protected: bool
+    is_admin: bool
     broker_backend: str
     quote_provider: str
     broker_environment: str
@@ -280,6 +288,11 @@ class PaperOrderRequest(BaseModel):
     limit_price: float = Field(gt=0)
     side: str = 'BUY'
     remark: str | None = None
+
+
+class AgentBonusAwardRequest(BaseModel):
+    agent_slug: str = Field(validation_alias=AliasChoices('agent_slug', 'sleeve_slug'))
+    amount: float = Field(gt=0)
 
 
 class DashboardOverviewResponse(BaseModel):

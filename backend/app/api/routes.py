@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+from secrets import compare_digest
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,7 @@ from app.models.entities import Company
 from app.models.entities import Decision
 from app.models.entities import Position
 from app.schemas.api import AgentCashPointResponse
+from app.schemas.api import AgentBonusAwardRequest
 from app.schemas.api import AgentHoldingsPointResponse
 from app.schemas.api import AgentPositionResponse
 from app.schemas.api import AgentResponse
@@ -48,14 +51,20 @@ from app.services.research import get_research_notes
 from app.services.research import refresh_live_research
 from app.services.trading import bootstrap_database
 from app.services.trading import build_broker_adapter
+from app.services.trading import award_agent_bonus
+from app.services.trading import get_agent_cash_only_at
+from app.services.trading import get_agent_cash_only_reason
+from app.services.trading import get_agent_next_benchmark_check_at
+from app.services.trading import get_benchmark_warmup_end_at
 from app.services.trading import get_active_mode
 from app.services.trading import get_agent_cash_history
 from app.services.trading import get_agent_history
 from app.services.trading import get_agent_holdings_history
+from app.services.trading import is_agent_benchmark_check_due
+from app.services.trading import is_agent_cash_only
 from app.services.trading import get_agent_positions
 from app.services.trading import get_competition_benchmark_state
 from app.services.trading import get_agent_trades
-from app.services.trading import get_live_capped_agent_slug
 from app.services.trading import get_runtime_settings
 from app.services.trading import get_selected_account_id
 from app.services.trading import get_strategy_agents
@@ -71,6 +80,37 @@ from app.strategy.engine import run_agent_autopilot_cycle
 from app.strategy.engine import set_autopilot_enabled
 
 router = APIRouter()
+ADMIN_HEADER_NAME = 'x-admin-token'
+LOCAL_ADMIN_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+
+
+def _request_hostname(request: Request) -> str:
+    host = (request.headers.get('host') or request.url.hostname or '').strip().lower()
+    return host.split(':', 1)[0]
+
+
+def _is_local_origin_request(request: Request) -> bool:
+    return _request_hostname(request) in LOCAL_ADMIN_HOSTS
+
+
+def _admin_controls_protected(request: Request, settings: Settings) -> bool:
+    return bool(settings.dashboard_admin_token) and not _is_local_origin_request(request)
+
+
+def _is_admin_request(request: Request, settings: Settings) -> bool:
+    if not _admin_controls_protected(request, settings):
+        return True
+    provided = (request.headers.get(ADMIN_HEADER_NAME) or '').strip()
+    return bool(provided) and compare_digest(provided, settings.dashboard_admin_token)
+
+
+def _require_admin_request(request: Request, settings: Settings) -> None:
+    if _is_admin_request(request, settings):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail='Admin controls are locked. Unlock the dashboard with the admin token to use this action.',
+    )
 
 
 def map_health(settings: Settings, db: Session) -> HealthResponse:
@@ -127,14 +167,16 @@ def map_dashboard_broker_health(settings: Settings, db: Session) -> BrokerHealth
     )
 
 
-def map_settings(settings: Settings, db: Session) -> SettingsResponse:
+def map_settings(settings: Settings, db: Session, *, request: Request) -> SettingsResponse:
     runtime_settings = get_runtime_settings(db, settings)
     autopilot = get_autopilot_status(db, settings)
     benchmark = get_competition_benchmark_state(db, settings, refresh=False)
     return SettingsResponse(
         app_mode=get_active_mode(db, settings),
+        admin_controls_protected=_admin_controls_protected(request, settings),
+        is_admin=_is_admin_request(request, settings),
         broker_backend=settings.broker_backend,
-        quote_provider=settings.quote_provider,
+        quote_provider=runtime_settings.quote_provider,
         broker_environment=runtime_settings.moomoo_trd_env,
         selected_acc_id=get_selected_account_id(db, settings),
         agent_autopilot_enabled=bool(autopilot['enabled']),
@@ -168,7 +210,20 @@ def map_agent(agent, db: Session) -> AgentResponse:
     history = [AgentHistoryPointResponse.model_validate(point) for point in get_agent_history(db, agent.slug)]
     cash_history = [AgentCashPointResponse.model_validate(point) for point in get_agent_cash_history(db, agent)]
     holdings_history = [AgentHoldingsPointResponse.model_validate(point) for point in get_agent_holdings_history(db, agent)]
-    return base.model_copy(update={'history': history, 'cash_history': cash_history, 'holdings_history': holdings_history})
+    now = datetime.utcnow()
+    return base.model_copy(
+        update={
+            'history': history,
+            'cash_history': cash_history,
+            'holdings_history': holdings_history,
+            'benchmark_warmup_ends_at': get_benchmark_warmup_end_at(agent),
+            'next_benchmark_check_at': get_agent_next_benchmark_check_at(db, agent, now),
+            'benchmark_check_due': is_agent_benchmark_check_due(db, agent, now),
+            'is_cash_only': is_agent_cash_only(db, agent.slug),
+            'cash_only_reason': get_agent_cash_only_reason(db, agent.slug),
+            'cash_only_at': get_agent_cash_only_at(db, agent.slug),
+        }
+    )
 
 
 @router.get('/health', response_model=HealthResponse)
@@ -198,9 +253,15 @@ def get_broker_accounts(
 
 
 @router.get('/quotes/{symbol}', response_model=QuoteResponse)
-def get_quote(symbol: str, settings: Settings = Depends(get_settings)) -> QuoteResponse:
+def get_quote(
+    symbol: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> QuoteResponse:
     try:
-        quote = get_quote_record(settings, symbol)
+        bootstrap_database(db, settings)
+        runtime_settings = get_runtime_settings(db, settings)
+        quote = get_quote_record(runtime_settings, symbol)
     except Exception as exc:
         message = str(exc)
         if 'No right to get the quote' in message or 'No right to subscribe the quote' in message:
@@ -279,14 +340,13 @@ def get_research_notes_view(
 
 @router.post('/research/run', response_model=ResearchRefreshResponse)
 def post_research_run(
+    request: Request,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> ResearchRefreshResponse:
+    _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     runtime_settings = get_runtime_settings(db, settings)
     agents = get_strategy_agents(db, settings)
-    if get_active_mode(db, settings) == 'live_capped':
-        allowed_slug = get_live_capped_agent_slug(runtime_settings)
-        agents = [agent for agent in agents if agent.slug == allowed_slug]
     generated = refresh_live_research(db, runtime_settings, agents=agents)
     decisions = db.scalars(select(Decision)).all()
     notes = get_research_notes(db, limit=500)
@@ -300,8 +360,10 @@ def post_research_run(
 
 @router.post('/broker/test', response_model=DashboardOverviewResponse)
 def post_broker_test(
+    request: Request,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> DashboardOverviewResponse:
+    _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     runtime_settings = get_runtime_settings(db, settings)
     adapter = build_broker_adapter(runtime_settings)
@@ -309,7 +371,7 @@ def post_broker_test(
         refresh_broker_state(db, adapter, settings)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return get_dashboard_overview(db, settings)
+    return get_dashboard_overview(request, db, settings)
 
 
 @router.get('/agents/autopilot', response_model=AutopilotStatusResponse)
@@ -322,9 +384,11 @@ def get_agents_autopilot(
 
 @router.post('/agents/autopilot', response_model=AutopilotStatusResponse)
 def post_agents_autopilot(
+    request: Request,
     payload: AutopilotToggleRequest,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> AutopilotStatusResponse:
+    _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     set_autopilot_enabled(db, payload.enabled)
     return AutopilotStatusResponse(**get_autopilot_status(db, settings))
@@ -332,8 +396,10 @@ def post_agents_autopilot(
 
 @router.post('/agents/cycle', response_model=AutopilotCycleResponse)
 def post_agents_cycle(
+    request: Request,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> AutopilotCycleResponse:
+    _require_admin_request(request, settings)
     try:
         result = run_agent_autopilot_cycle(db, settings, force=True)
     except ValueError as exc:
@@ -341,6 +407,24 @@ def post_agents_cycle(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return AutopilotCycleResponse(**result)
+
+
+@router.post('/agents/bonus', response_model=DashboardOverviewResponse)
+def post_agent_bonus(
+    request: Request,
+    payload: AgentBonusAwardRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> DashboardOverviewResponse:
+    _require_admin_request(request, settings)
+    bootstrap_database(db, settings)
+    try:
+        award_agent_bonus(db, payload.agent_slug, payload.amount)
+        refresh_strategy_game_state(db, settings, commit=False)
+        db.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_dashboard_overview(request, db, settings)
 
 
 @router.get('/positions', response_model=list[PositionResponse])
@@ -374,10 +458,12 @@ def get_orders(
 
 @router.post('/orders/paper', response_model=BrokerOrderResponse)
 def post_paper_order(
+    request: Request,
     payload: PaperOrderRequest,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> BrokerOrderResponse:
+    _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     runtime_settings = get_runtime_settings(db, settings)
     adapter = build_broker_adapter(runtime_settings)
@@ -410,35 +496,43 @@ def get_decisions(db: Session = Depends(get_db), settings: Settings = Depends(ge
 @router.get('/themes', response_model=list[CompanyResponse])
 def get_themes(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> list[CompanyResponse]:
     bootstrap_database(db, settings)
-    companies = db.scalars(select(Company).order_by(Company.total_score.desc())).all()
+    companies = db.scalars(
+        select(Company)
+        .where(Company.is_approved.is_(True), Company.theme_name == 'Pick-and-Shovel Growth')
+        .order_by(Company.total_score.desc())
+    ).all()
     return [CompanyResponse.model_validate(company, from_attributes=True) for company in companies]
 
 
 @router.get('/settings', response_model=SettingsResponse)
 def get_settings_view(
+    request: Request,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> SettingsResponse:
     bootstrap_database(db, settings)
-    return map_settings(settings, db)
+    return map_settings(settings, db, request=request)
 
 
 @router.post('/mode', response_model=SettingsResponse)
 def post_mode(
+    request: Request,
     payload: ModeUpdateRequest,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> SettingsResponse:
+    _require_admin_request(request, settings)
     bootstrap_database(db, settings)
     valid_modes = {'paused', 'paper', 'live_capped'}
     if payload.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f'Mode must be one of {sorted(valid_modes)}')
     set_setting_value(db, 'app_mode', payload.mode)
     db.commit()
-    return map_settings(settings, db)
+    return map_settings(settings, db, request=request)
 
 
 @router.get('/dashboard/overview', response_model=DashboardOverviewResponse)
 def get_dashboard_overview(
+    request: Request,
     db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
 ) -> DashboardOverviewResponse:
     bootstrap_database(db, settings)
@@ -454,7 +548,11 @@ def get_dashboard_overview(
     decisions = db.scalars(
         select(Decision).order_by(Decision.strategy_name.asc(), Decision.conviction_score.desc())
     ).all()
-    companies = db.scalars(select(Company).order_by(Company.total_score.desc())).all()
+    companies = db.scalars(
+        select(Company)
+        .where(Company.is_approved.is_(True), Company.theme_name == 'Pick-and-Shovel Growth')
+        .order_by(Company.total_score.desc())
+    ).all()
     alerts = db.scalars(select(Alert).where(Alert.is_active.is_(True)).order_by(Alert.created_at.desc())).all()
     return DashboardOverviewResponse(
         health=map_health(settings, db),
@@ -469,5 +567,5 @@ def get_dashboard_overview(
         decisions=[DecisionResponse.model_validate(decision, from_attributes=True) for decision in decisions],
         companies=[CompanyResponse.model_validate(company, from_attributes=True) for company in companies],
         alerts=[AlertResponse.model_validate(alert, from_attributes=True) for alert in alerts],
-        settings=map_settings(settings, db),
+        settings=map_settings(settings, db, request=request),
     )

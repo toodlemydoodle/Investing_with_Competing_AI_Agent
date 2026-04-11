@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>moomoo AI Agent Arena</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260403-8" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260411-8" />
   </head>
   <body>
     <div class="page-noise"></div>
@@ -13,12 +13,12 @@
       <header class="masthead">
         <div>
           <p class="eyebrow">Moomoo AI Agent Arena</p>
-          <h1>Two agents compete until one fails to beat the S&amp;P 500.</h1>
+          <h1>Two agents compete for capital while trying to beat the S&amp;P 500.</h1>
         </div>
         <div class="masthead-badges">
           <span class="signal-chip">US Stocks Only</span>
           <span class="signal-chip">Paper First</span>
-          <span class="signal-chip">Beat SPY Or Lose</span>
+          <span class="signal-chip">Beat SPY Or De-Risk</span>
         </div>
       </header>
       <section class="hero">
@@ -29,18 +29,18 @@
           </div>
           <h2>One specialist agent hunts picks-and-shovels. One liberated agent can roam any US-listed stock.</h2>
           <p class="lede">
-            Both agents stay inside US stocks. The stronger one earns more capital. After day 90, trailing US.SPY means elimination.
+            Both agents stay inside US stocks. The stronger one earns more capital. There is no benchmark penalty for the first 90 days, then US.SPY checks happen monthly.
           </p>
           <div class="hero-rules">
             <div class="rule-card">
               <p class="eyebrow">Rule 01</p>
               <strong>Beat SPY</strong>
-              <span>After the first 90 days, any agent trailing US.SPY loses the arena.</span>
+              <span>There is no benchmark penalty for the first 90 days. After that, trailing US.SPY at a monthly checkpoint forces live-capped agents into cash and can eliminate paper agents.</span>
             </div>
             <div class="rule-card">
               <p class="eyebrow">Rule 02</p>
               <strong>Compete For Capital</strong>
-              <span>The current leader gets a larger bankroll share.</span>
+              <span>When a capital award is made, the current leader gets the bonus cash.</span>
             </div>
             <div class="rule-card">
               <p class="eyebrow">Rule 03</p>
@@ -56,14 +56,28 @@
               <p class="eyebrow">Control Deck</p>
               <h2>Mode and Sync</h2>
             </div>
-            <span class="pill warn">Manual Refresh</span>
+            <span id="mode-pill" class="pill neutral">paper</span>
           </div>
-          <div class="button-row">
+          <div class="button-row controls-row">
             <button data-mode="paper">Paper</button>
             <button data-mode="live_capped">Live Capped</button>
-          </div>
-          <div class="button-row">
             <button id="autopilot-toggle-button">Autopilot: Off</button>
+          </div>
+          <div id="admin-panel" class="admin-panel hidden">
+            <div class="admin-panel-copy">
+              <strong id="admin-status-label">Public read-only mode</strong>
+              <span id="admin-status-detail">Unlock admin controls to change runtime settings, submit orders, or award cash.</span>
+            </div>
+            <form id="admin-unlock-form" class="admin-form">
+              <label class="admin-form-field">
+                <span>Admin Token</span>
+                <input id="admin-token-input" type="password" autocomplete="current-password" placeholder="Enter admin token" />
+              </label>
+              <div class="button-row admin-form-actions">
+                <button id="admin-unlock-button" type="submit" class="primary">Unlock Admin</button>
+                <button id="admin-lock-button" type="button" class="hidden">Lock</button>
+              </div>
+            </form>
           </div>
           <button id="refresh-button" class="text-link">Refresh Broker State</button>
           <div id="autopilot-status" class="ops-note"></div>
@@ -141,6 +155,7 @@
             </div>
             <div id="quote-summary" class="quote-summary full"></div>
           </form>
+          <p id="order-lock-note" class="control-locked-note hidden">Order submission is locked in public read-only mode.</p>
         </article>
       </section>
 
@@ -172,11 +187,12 @@
         </article>
       </section>
 
-      <section class="section-header">
+      <section class="section-header section-header-with-action">
         <div>
           <p class="eyebrow">Research Queues</p>
           <h2>Generated ideas by agent</h2>
         </div>
+        <button id="run-research-button" class="section-action research-action">Run Research</button>
       </section>
       <section class="grid two">
         <article class="panel">
@@ -213,6 +229,7 @@
             <div>
               <p class="eyebrow">Universe</p>
               <h2>Approved US Stocks</h2>
+              <p class="panel-note">The Pick-and-Shovel universe can now evolve: approved names keep their live conviction score, strong specialist conviction can promote new symbols, and repeated weak unheld runs can remove them.</p>
             </div>
           </div>
           <div class="table-wrap">
@@ -263,7 +280,7 @@
       </section>
 
     </main>
-    <script src="/static/app.js?v=20260403-10" defer></script>
+    <script src="/static/app.js?v=20260411-11" defer></script>
   </body>
 </html>
 

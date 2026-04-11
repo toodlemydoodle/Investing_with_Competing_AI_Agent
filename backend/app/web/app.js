@@ -1,5 +1,37 @@
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const REQUEST_TIMEOUT_MS = 8000;
+const ADMIN_TOKEN_STORAGE_KEY = 'arenaAdminToken';
+let latestOverviewData = null;
+
+function getAdminToken() {
+  try {
+    return sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function setAdminToken(value) {
+  try {
+    if (value) {
+      sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, value);
+    } else {
+      sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    }
+  } catch {}
+}
+
+function buildRequestHeaders(init = {}) {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const adminToken = getAdminToken();
+  if (adminToken) {
+    headers.set('X-Admin-Token', adminToken);
+  }
+  return headers;
+}
 
 function fmtMoney(value) { return money.format(Number(value || 0)); }
 function fmtMaybeMoney(value) { return value === null || value === undefined ? 'n/a' : fmtMoney(value); }
@@ -89,13 +121,24 @@ async function request(path, init) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
+    const requestInit = init || {};
     const response = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
+      ...requestInit,
+      headers: buildRequestHeaders(requestInit),
       signal: controller.signal,
-      ...init,
     });
     if (!response.ok) {
-      throw new Error(await response.text() || `Request failed: ${response.status}`);
+      const raw = await response.text();
+      let message = raw || `Request failed: ${response.status}`;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && typeof parsed.detail === 'string') {
+            message = parsed.detail;
+          }
+        } catch {}
+      }
+      throw new Error(message);
     }
     return response.json();
   } catch (error) {
@@ -111,15 +154,17 @@ async function request(path, init) {
 function showMessage(kind, text) {
   const notice = document.getElementById('notice');
   const error = document.getElementById('error');
-  if (kind === 'error') {
-    error.textContent = text;
-    error.classList.remove('hidden');
-    notice.classList.add('hidden');
-  } else {
+  if (kind === 'ok') {
     notice.textContent = text;
+    notice.className = 'banner ok';
     notice.classList.remove('hidden');
     error.classList.add('hidden');
+    return;
   }
+  error.textContent = text;
+  error.className = kind === 'warn' ? 'banner warn' : 'banner error';
+  error.classList.remove('hidden');
+  notice.classList.add('hidden');
 }
 
 function bindClick(id, handler) {
@@ -127,6 +172,102 @@ function bindClick(id, handler) {
   if (!el) { return null; }
   el.addEventListener('click', handler);
   return el;
+}
+
+function adminControlsProtected(data) {
+  return Boolean(data?.settings?.admin_controls_protected);
+}
+
+function isAdminSession(data) {
+  return Boolean(data?.settings?.is_admin);
+}
+
+function isReadOnlyViewer(data) {
+  return adminControlsProtected(data) && !isAdminSession(data);
+}
+
+function renderAdminPanel(data) {
+  const panel = document.getElementById('admin-panel');
+  const label = document.getElementById('admin-status-label');
+  const detail = document.getElementById('admin-status-detail');
+  const input = document.getElementById('admin-token-input');
+  const unlockButton = document.getElementById('admin-unlock-button');
+  const lockButton = document.getElementById('admin-lock-button');
+  if (!panel || !label || !detail || !input || !unlockButton || !lockButton) { return; }
+
+  const protectedControls = adminControlsProtected(data);
+  const isAdmin = isAdminSession(data);
+  panel.classList.toggle('hidden', !protectedControls);
+
+  if (!protectedControls) {
+    return;
+  }
+
+  if (isAdmin) {
+    label.textContent = 'Admin controls unlocked';
+    detail.textContent = 'This browser session can change runtime settings, place manual orders, refresh research, and award cash.';
+    input.value = '';
+    input.disabled = true;
+    unlockButton.classList.add('hidden');
+    lockButton.classList.remove('hidden');
+  } else {
+    label.textContent = 'Public read-only mode';
+    detail.textContent = 'Visitors can view the dashboard, but admin actions stay locked until you unlock this browser session.';
+    input.disabled = false;
+    unlockButton.classList.remove('hidden');
+    lockButton.classList.add('hidden');
+  }
+}
+
+function applyAdminLocks(data) {
+  const locked = isReadOnlyViewer(data);
+
+  document.querySelectorAll('[data-mode]').forEach((button) => {
+    button.disabled = locked;
+  });
+
+  const refreshButton = document.getElementById('refresh-button');
+  if (refreshButton) { refreshButton.disabled = locked; }
+
+  const autopilotButton = document.getElementById('autopilot-toggle-button');
+  if (autopilotButton) { autopilotButton.disabled = locked; }
+
+  const researchButton = document.getElementById('run-research-button');
+  if (researchButton) { researchButton.disabled = locked; }
+
+  const cycleButton = document.getElementById('run-cycle-button');
+  if (cycleButton) { cycleButton.disabled = locked; }
+
+  const bankrollForm = document.getElementById('bankroll-bonus-form');
+  if (bankrollForm) {
+    bankrollForm.querySelectorAll('select, input, button').forEach((field) => {
+      field.disabled = locked;
+    });
+  }
+
+  const orderLockNote = document.getElementById('order-lock-note');
+  if (orderLockNote) {
+    orderLockNote.classList.toggle('hidden', !locked);
+  }
+
+  const orderForm = document.getElementById('order-form');
+  if (!orderForm) { return; }
+
+  const agentSelect = orderForm.querySelector('select[name="agent_slug"]');
+  const quantityInput = orderForm.querySelector('input[name="quantity"]');
+  const limitInput = orderForm.querySelector('input[name="limit_price"]');
+  const sideSelect = orderForm.querySelector('select[name="side"]');
+  const remarkInput = orderForm.querySelector('input[name="remark"]');
+  const submitButton = document.getElementById('submit-order');
+  const aliveAgents = data.agents.filter((agent) => agent.is_alive);
+  const hasAliveAgents = aliveAgents.length > 0;
+
+  if (agentSelect) { agentSelect.disabled = locked || !hasAliveAgents; }
+  if (quantityInput) { quantityInput.disabled = locked; }
+  if (limitInput) { limitInput.disabled = locked; }
+  if (sideSelect) { sideSelect.disabled = locked; }
+  if (remarkInput) { remarkInput.disabled = locked; }
+  if (submitButton) { submitButton.disabled = locked || !hasAliveAgents; }
 }
 
 
@@ -531,37 +672,168 @@ function renderBenchmarkPanel(settings) {
   `;
 }
 
+function renderBankrollStat(data) {
+  const preferredOrder = ['liberated-us-stocks', 'pick-shovel-growth'];
+  const locked = isReadOnlyViewer(data);
+  const agents = [...data.agents].sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left.slug);
+    const rightIndex = preferredOrder.indexOf(right.slug);
+    return (leftIndex === -1 ? preferredOrder.length : leftIndex) - (rightIndex === -1 ? preferredOrder.length : rightIndex);
+  });
+  const awardableAgents = agents.filter((agent) => agent.is_enabled && agent.is_alive);
+  const defaultRecipient = (data.agents.find((agent) => agent.is_winner && agent.is_alive) || awardableAgents[0] || agents[0] || {}).slug || '';
+  const rows = agents.map((agent) => {
+    const startingCash = Number(agent.starting_capital || 0);
+    const bonusCash = Math.max(Number(agent.allocated_capital || 0) - startingCash, 0);
+    return `
+      <div class="bankroll-breakdown-row">
+        <strong>${agentName(agent.name)}</strong>
+        <div class="bankroll-breakdown-values">
+          <span>Start ${fmtMoney(startingCash)}</span>
+          <span>Bonus ${fmtMoney(bonusCash)}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+  const options = awardableAgents.map((agent) => `
+    <option value="${agent.slug}"${agent.slug === defaultRecipient ? ' selected' : ''}>${agentName(agent.name)}</option>
+  `).join('');
+
+  return `
+    <article class="stat stat-bankroll">
+      <p class="eyebrow">Bankroll Cap</p>
+      <div class="bankroll-breakdown">${rows}</div>
+      <form id="bankroll-bonus-form" class="bankroll-award-form">
+        <div class="bankroll-award-fields">
+          <label class="bankroll-award-field">
+            <span>Reward Agent</span>
+            <select name="agent_slug"${awardableAgents.length && !locked ? '' : ' disabled'}>
+              ${options}
+            </select>
+          </label>
+          <label class="bankroll-award-field">
+            <span>Bonus Amount (USD)</span>
+            <input type="number" name="amount" min="0.01" step="0.01" value="100" placeholder="100"${locked ? ' disabled' : ''} />
+          </label>
+        </div>
+        <div class="bankroll-award-actions">
+          <button type="submit" class="primary" ${awardableAgents.length && !locked ? '' : 'disabled'}>Award Cash</button>
+          <span class="bankroll-award-note">Adds to that agent&apos;s total bonus in USD.</span>
+        </div>
+        ${locked ? '<p class="control-locked-note">Cash awards are locked until you unlock admin controls.</p>' : ''}
+      </form>
+    </article>
+  `;
+}
+
 function renderStats(data) {
   const winner = data.agents.find((agent) => agent.is_winner) || null;
-  const aliveCount = data.agents.filter((agent) => agent.is_alive).length;
+  const mode = String(data.settings.app_mode || data.health.mode || 'paper');
   const windowDays = data.agents[0] ? data.agents[0].competition_window_days : 90;
   const benchmarkSymbol = data.settings.competition_benchmark_symbol || 'US.SPY';
   const benchmarkReturn = data.settings.competition_benchmark_return_pct;
+  const warmupActive = data.agents.some((agent) => agent.is_alive && !agent.is_eligible_for_elimination);
+  const checkpointDue = data.agents.some((agent) => agent.is_alive && agent.benchmark_check_due);
   const nextCheck = data.agents
-    .filter((agent) => agent.is_alive && !agent.is_eligible_for_elimination && agent.elimination_ready_at)
-    .map((agent) => agent.elimination_ready_at)
+    .filter((agent) => agent.is_alive && agent.next_benchmark_check_at)
+    .map((agent) => agent.next_benchmark_check_at)
     .sort()[0];
+  const arenaRuleDetail = warmupActive
+    ? (
+      mode === 'live_capped'
+        ? (nextCheck ? `Warm-up ends ${fmtDate(nextCheck)}. No benchmark cash lock before then.` : `No benchmark cash lock for the first ${windowDays} days.`)
+        : (nextCheck ? `Warm-up ends ${fmtDate(nextCheck)}. No benchmark elimination before then.` : `No benchmark elimination for the first ${windowDays} days.`)
+    )
+    : checkpointDue
+      ? `Monthly benchmark check is live now | ${benchmarkSymbol} ${fmtMaybePercent(benchmarkReturn)} | ${mode === 'live_capped' ? 'trailing agents go cash-only' : 'trailing agents can be eliminated'}`
+      : (nextCheck ? `Next benchmark check ${fmtDate(nextCheck)} | ${benchmarkSymbol} ${fmtMaybePercent(benchmarkReturn)}` : `Monthly checks begin after the ${windowDays}-day warm-up.`);
   const statCards = [
-    ['Bankroll Cap', fmtMoney(data.settings.risk_bankroll_cap), `Max order ${fmtMoney(data.settings.risk_max_order_notional)}`],
-    ['Surviving Agents', String(aliveCount), `${data.agents.length - aliveCount} eliminated`],
-    ['Leading Agent', winner ? agentName(winner.name) : 'No survivor', winner ? `${fmtPercent(winner.total_return_pct)} total return | ${fmtWeight(winner.target_weight)} capital` : 'No live agent to reward'],
-    ['Arena Rule', `${windowDays}-day benchmark test`, nextCheck ? `First elimination window opens ${fmtDate(nextCheck)} | ${benchmarkSymbol} ${fmtMaybePercent(benchmarkReturn)}` : `After warm-up, trailing ${benchmarkSymbol} means elimination`],
+    ['Leading Agent', winner ? agentName(winner.name) : 'No survivor', winner ? `${fmtPercent(winner.total_return_pct)} total return | ${fmtMoney(winner.current_value)} value` : 'No live agent to reward'],
+    ['Arena Rule', `${windowDays}-day warm-up, then monthly checks`, arenaRuleDetail],
   ].map(([label, value, detail]) => `<article class="stat"><p class="eyebrow">${label}</p><h3>${value}</h3><p>${detail}</p></article>`).join('');
-  document.getElementById('stats').innerHTML = `${statCards}${renderBenchmarkPanel(data.settings)}`;
+  document.getElementById('stats').innerHTML = `${renderBankrollStat(data)}${statCards}${renderBenchmarkPanel(data.settings)}`;
 }
 
-function agentBadge(agent, benchmarkReturn, benchmarkSymbol) {
+function bindBankrollBonusForm() {
+  const form = document.getElementById('bankroll-bonus-form');
+  if (!form) { return; }
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const formData = new FormData(form);
+    const agentSlug = String(formData.get('agent_slug') || '').trim();
+    const amount = Number(formData.get('amount'));
+    if (!agentSlug) {
+      showMessage('error', 'Choose an agent to receive the cash reward.');
+      return;
+    }
+    if (!(amount > 0)) {
+      showMessage('error', 'Enter a bonus amount greater than zero.');
+      return;
+    }
+
+    const button = form.querySelector('button[type="submit"]');
+    const select = form.querySelector('select[name="agent_slug"]');
+    const agentLabel = select && select.selectedOptions.length ? select.selectedOptions[0].textContent : 'the selected agent';
+    const previousLabel = button ? button.textContent : '';
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Awarding...';
+    }
+
+    try {
+      const data = await request('/agents/bonus', {
+        method: 'POST',
+        body: JSON.stringify({
+          agent_slug: agentSlug,
+          amount,
+        }),
+      });
+      renderOverviewData(data);
+      showMessage('ok', `Awarded ${fmtMoney(amount)} to ${agentLabel}.`);
+    } catch (error) {
+      showMessage('error', error.message || 'Failed to award the cash bonus.');
+      if (button) {
+        button.disabled = false;
+        button.textContent = previousLabel || 'Award Cash';
+      }
+    }
+  });
+}
+
+function getBrokerAvailableFunds(data) {
+  const funds = Number(data?.broker_health?.account_summary?.available_funds);
+  return Number.isFinite(funds) ? funds : null;
+}
+
+function looksLikeCashConstraint(message) {
+  const normalized = String(message || '').toLowerCase();
+  return [
+    'not enough cash',
+    'not enough allocated cash',
+    'available funds',
+    'buying power',
+    'insufficient',
+    'cash-only',
+  ].some((fragment) => normalized.includes(fragment));
+}
+
+function agentBadge(agent, benchmarkReturn, benchmarkSymbol, mode) {
   if (!agent.is_alive) { return pill('error', 'lost'); }
+  if (mode === 'live_capped' && agent.is_cash_only) { return pill(agent.is_winner ? 'ok' : 'warn', agent.is_winner ? 'leader cash-only' : 'cash only'); }
   if (agent.is_winner) { return pill('ok', 'leader'); }
   if (!agent.is_eligible_for_elimination) { return pill('neutral', 'warming up'); }
-  if (benchmarkReturn !== null && benchmarkReturn !== undefined && Number(agent.total_return_pct || 0) < Number(benchmarkReturn)) {
-    return pill('warn', `below ${String(benchmarkSymbol || 'SPY').replace('US.', '')}`);
+  if (agent.benchmark_check_due) {
+    if (benchmarkReturn !== null && benchmarkReturn !== undefined && Number(agent.total_return_pct || 0) < Number(benchmarkReturn)) {
+      return pill('warn', `below ${String(benchmarkSymbol || 'SPY').replace('US.', '')}`);
+    }
+    return pill('warn', 'checkpoint live');
   }
-  return pill('ok', 'alive');
+  return pill('neutral', 'monthly checks');
 }
 
 function renderAgents(data) {
   const winner = data.agents.find((agent) => agent.is_winner && agent.is_alive);
+  const mode = String(data.settings.app_mode || data.health.mode || 'paper');
   const benchmarkSymbol = data.settings.competition_benchmark_symbol || 'US.SPY';
   const benchmarkReturn = data.settings.competition_benchmark_return_pct;
   setPill('winner-badge', winner ? 'ok' : 'error', winner ? `leader ${agentName(winner.name)}` : 'no live winner');
@@ -569,23 +841,29 @@ function renderAgents(data) {
     const benchmarkGap = benchmarkReturn === null || benchmarkReturn === undefined
       ? null
       : Number(agent.total_return_pct || 0) - Number(benchmarkReturn || 0);
-    const windowLine = agent.is_eligible_for_elimination
-      ? `${benchmarkSymbol} is ${fmtMaybePercent(benchmarkReturn)}. This agent is ${fmtPercent(agent.total_return_pct)} since the arena began.`
-      : `Warm-up ends ${fmtDate(agent.elimination_ready_at)}. Benchmark elimination starts after that.`;
+    const windowLine = !agent.is_eligible_for_elimination
+      ? (
+        mode === 'live_capped'
+          ? `Warm-up ends ${fmtDate(agent.benchmark_warmup_ends_at || agent.elimination_ready_at)}. No benchmark cash lock happens before then.`
+          : `Warm-up ends ${fmtDate(agent.benchmark_warmup_ends_at || agent.elimination_ready_at)}. No benchmark elimination happens before then.`
+      )
+      : mode === 'live_capped' && agent.is_cash_only
+        ? `${agent.cash_only_reason || 'This agent is locked to cash after trailing SPY at a monthly checkpoint.'}${agent.cash_only_at ? ` Triggered ${fmtDate(agent.cash_only_at)}.` : ''}`
+        : agent.benchmark_check_due
+          ? `Monthly benchmark check is live. ${benchmarkSymbol} is ${fmtMaybePercent(benchmarkReturn)} and this agent is ${fmtPercent(agent.total_return_pct)} since the arena began.`
+          : `Next monthly benchmark check is ${fmtDate(agent.next_benchmark_check_at)}. ${benchmarkSymbol} is ${fmtMaybePercent(benchmarkReturn)} right now.`;
     const body = agent.is_alive
       ? `${agent.mandate} ${windowLine}`
       : `${agent.death_reason || 'This agent lost the arena.'} Allowed universe was ${agent.allowed_universe}.`;
-    return card(
+    return cardHtml(
       agentName(agent.name),
-      body,
+      `<p>${body}</p>`,
       [
-        agentBadge(agent, benchmarkReturn, benchmarkSymbol),
+        agentBadge(agent, benchmarkReturn, benchmarkSymbol, mode),
         `<span>${fmtPercent(agent.total_return_pct)} total return</span>`,
         `<span>${benchmarkGap === null ? 'Benchmark gap n/a' : `${fmtPercent(benchmarkGap)} vs ${benchmarkSymbol}`}</span>`,
         `<span>${fmtMoney(agent.rolling_net_pnl)} rolling net</span>`,
-        `<span>${fmtWeight(agent.target_weight)} capital</span>`,
         `<span>${fmtMoney(agent.current_value)} value</span>`,
-        `<span>${agent.reward_multiplier.toFixed(2)}x reward</span>`,
       ],
     );
   }).join('');
@@ -636,9 +914,9 @@ function renderDecisions(data) {
           decision.status.replace('research-', '')
         ),
         `<span>${decision.theme_name}</span>`,
-        `<span>${fmtMoney(decision.max_notional)}</span>`,
-        `<span>${fmtWeight(decision.target_weight)}</span>`,
-        `<span>${decision.conviction_score.toFixed(1)}/10</span>`
+        `<span>Max ${fmtMoney(decision.max_notional)}</span>`,
+        `<span>Weight ${fmtWeight(decision.target_weight)}</span>`,
+        `<span>Conviction ${decision.conviction_score.toFixed(1)}/10</span>`
       ]
     )).join('') : `<p class="empty">${emptyMessage}</p>`;
   };
@@ -725,26 +1003,47 @@ function renderPositions(data) {
 }
 
 function renderCompanies(data) {
-  document.getElementById('companies').innerHTML = data.companies.map((company) => `
-    <tr>
-      <td>${company.symbol}</td>
-      <td>${company.name}</td>
-      <td>${company.theme_name}</td>
-      <td>${company.total_score.toFixed(1)}</td>
-    </tr>
-  `).join('');
+  const specialistScores = Object.fromEntries(
+    data.decisions
+      .filter((decision) => decision.strategy_slug === 'pick-shovel-growth')
+      .map((decision) => [decision.symbol, Number(decision.conviction_score || 0)])
+  );
+  document.getElementById('companies').innerHTML = data.companies.map((company) => {
+    const displayScore = specialistScores[company.symbol] ?? Number(company.total_score || 0);
+    return `
+      <tr>
+        <td>${company.symbol}</td>
+        <td>${company.name}</td>
+        <td>${company.theme_name}</td>
+        <td>${displayScore.toFixed(1)}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 function renderAutopilot(data) {
   const el = document.getElementById('autopilot-status');
   const toggle = document.getElementById('autopilot-toggle-button');
   const isEnabled = data.settings.agent_autopilot_enabled;
+  const mode = String(data.settings.app_mode || data.health.mode || 'paper');
 
   if (toggle) {
     toggle.textContent = isEnabled ? 'Autopilot: On' : 'Autopilot: Off';
     toggle.className = isEnabled ? 'primary' : '';
     toggle.dataset.enabled = isEnabled;
   }
+
+  document.querySelectorAll('[data-mode]').forEach((button) => {
+    const isActiveMode = button.dataset.mode === mode;
+    button.classList.toggle('primary', isActiveMode);
+    button.setAttribute('aria-pressed', isActiveMode ? 'true' : 'false');
+  });
+
+  setPill(
+    'mode-pill',
+    mode === 'live_capped' ? 'warn' : 'ok',
+    mode === 'live_capped' ? 'live capped' : mode === 'paper' ? 'paper' : mode
+  );
 
   const status = isEnabled ? 'Autopilot enabled' : 'Autopilot disabled';
   const lastRun = data.settings.agent_autopilot_last_cycle_at ? `Last cycle ${fmtDate(data.settings.agent_autopilot_last_cycle_at)}` : 'No cycle has run yet';
@@ -755,6 +1054,11 @@ function renderAutopilot(data) {
 function renderBroker(data) {
   const broker = data.broker_health;
   const selectedAccount = data.accounts.find((account) => account.is_selected);
+  const availableFunds = getBrokerAvailableFunds(data);
+  const warnings = [...(broker.warnings || [])];
+  if (availableFunds !== null && availableFunds <= 0) {
+    warnings.unshift('Broker available funds are depleted. New BUY orders will not execute until cash is added or positions are sold.');
+  }
   setPill('broker-pill', broker.is_reachable ? 'ok' : 'error', broker.is_reachable ? 'reachable' : 'offline');
   document.getElementById('broker-summary').innerHTML = [
     ['Backend', data.settings.broker_backend],
@@ -762,9 +1066,10 @@ function renderBroker(data) {
     ['Selected account', broker.selected_acc_id || 'Not set'],
     ['Security firm', selectedAccount ? selectedAccount.security_firm : 'Unknown'],
     ['Environment', broker.environment],
+    ['Available funds', availableFunds === null ? 'n/a' : fmtMoney(availableFunds)],
     ['Mode', data.health.mode],
   ].map(([label, value]) => `<div><p class="eyebrow">${label}</p><strong>${value}</strong></div>`).join('');
-  document.getElementById('warnings').innerHTML = (broker.warnings || []).map((warning) => `<li>${warning}</li>`).join('');
+  document.getElementById('warnings').innerHTML = warnings.map((warning) => `<li>${warning}</li>`).join('');
   document.getElementById('alerts').innerHTML = data.alerts.map((alert) => `
     <div class="alert-card ${alert.severity}">
       <strong>${alert.title}</strong>
@@ -815,9 +1120,10 @@ async function fetchQuote() {
   ].join('');
 }
 
-async function refreshOverview() {
-  const data = await request('/dashboard/overview');
+function renderOverviewData(data) {
+  latestOverviewData = data;
   renderStats(data);
+  bindBankrollBonusForm();
   renderAgents(data);
   renderAgentPositions(data);
   renderAgentTrades(data);
@@ -827,10 +1133,60 @@ async function refreshOverview() {
   renderBroker(data);
   renderAutopilot(data);
   populateAgentSelect(data);
+  renderAdminPanel(data);
+  applyAdminLocks(data);
+}
+
+async function refreshOverview() {
+  const data = await request('/dashboard/overview');
+  renderOverviewData(data);
   return data;
 }
 
 async function init() {
+  const adminUnlockForm = document.getElementById('admin-unlock-form');
+  if (adminUnlockForm) {
+    adminUnlockForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = document.getElementById('admin-token-input');
+      const submittedToken = String(input?.value || '').trim();
+      if (!submittedToken) {
+        showMessage('error', 'Enter the admin token to unlock the control deck.');
+        return;
+      }
+
+      const previousToken = getAdminToken();
+      setAdminToken(submittedToken);
+      try {
+        const data = await refreshOverview();
+        if (!isAdminSession(data)) {
+          setAdminToken(previousToken);
+          await refreshOverview();
+          showMessage('error', 'That admin token was rejected.');
+          return;
+        }
+        if (input) {
+          input.value = '';
+        }
+        showMessage('ok', 'Admin controls unlocked for this browser session.');
+      } catch (error) {
+        setAdminToken(previousToken);
+        await refreshOverview();
+        showMessage('error', error.message || 'Failed to unlock admin controls.');
+      }
+    });
+  }
+
+  bindClick('admin-lock-button', async () => {
+    setAdminToken('');
+    try {
+      await refreshOverview();
+      showMessage('ok', 'Admin controls locked. The dashboard is back in public read-only mode.');
+    } catch (error) {
+      showMessage('error', error.message || 'Failed to relock admin controls.');
+    }
+  });
+
   bindClick('refresh-button', async () => {
     try {
       await request('/broker/test', { method: 'POST' });
@@ -911,23 +1267,41 @@ async function init() {
   if (orderForm) {
     orderForm.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (isReadOnlyViewer(latestOverviewData)) {
+        showMessage('warn', 'Order submission is locked in public read-only mode.');
+        return;
+      }
       const form = new FormData(event.currentTarget);
+      const side = String(form.get('side') || 'BUY').toUpperCase();
+      const quantity = Number(form.get('quantity'));
+      const limitPrice = Number(form.get('limit_price'));
+      const notional = quantity * limitPrice;
+      const availableFunds = getBrokerAvailableFunds(latestOverviewData);
+      if (side === 'BUY' && availableFunds !== null && notional > availableFunds) {
+        showMessage('warn', `Broker account only has ${fmtMoney(availableFunds)} available, so this ${fmtMoney(notional)} buy will not execute.`);
+        return;
+      }
       try {
         await request('/orders/paper', {
           method: 'POST',
           body: JSON.stringify({
             symbol: form.get('symbol'),
             agent_slug: form.get('agent_slug'),
-            quantity: Number(form.get('quantity')),
-            limit_price: Number(form.get('limit_price')),
-            side: form.get('side'),
+            quantity,
+            limit_price: limitPrice,
+            side,
             remark: form.get('remark'),
           }),
         });
         await refreshOverview();
-        showMessage('ok', `Submitted ${form.get('side')} ${form.get('symbol')}.`);
+        showMessage('ok', `Submitted ${side} ${form.get('symbol')}.`);
       } catch (error) {
-        showMessage('error', error.message || 'Paper order failed.');
+        const message = error.message || 'Paper order failed.';
+        if (looksLikeCashConstraint(message)) {
+          showMessage('warn', message);
+        } else {
+          showMessage('error', message);
+        }
       }
     });
   }

@@ -27,6 +27,13 @@ COLUMN_ADDITIONS = {
         'elimination_ready_at': 'DATETIME',
         'last_scored_at': 'DATETIME',
     },
+    'companies': {
+        'approval_source': "TEXT NOT NULL DEFAULT 'baseline'",
+        'approval_positive_streak': 'INTEGER NOT NULL DEFAULT 0',
+        'approval_negative_streak': 'INTEGER NOT NULL DEFAULT 0',
+        'last_conviction_score': 'FLOAT NOT NULL DEFAULT 0',
+        'last_researched_at': 'DATETIME',
+    },
 }
 
 

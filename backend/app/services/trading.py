@@ -37,13 +37,32 @@ BROKER_ORDER_SYNC_CUTOFF_PATH = BACKEND_ROOT / '.broker-order-sync-cutoff.txt'
 BROKER_RECONCILIATION_ALERT_TITLE = 'Broker ledger reconciliation warning'
 BENCHMARK_HISTORY_KEY = 'competition_benchmark_history'
 BENCHMARK_START_AT_KEY = 'competition_benchmark_start_at'
+LEADER_BONUS_RECIPIENT_KEY = 'leader_bonus_recipient'
+LEADER_BONUS_AMOUNT_KEY = 'leader_bonus_amount'
+AGENT_BONUS_TOTAL_KEY_PREFIX = 'agent_bonus_total::'
+AGENT_BENCHMARK_CHECKPOINT_KEY_PREFIX = 'agent_benchmark_checkpoint::'
+AGENT_CASH_ONLY_KEY_PREFIX = 'agent_cash_only::'
+AGENT_CASH_ONLY_AT_KEY_PREFIX = 'agent_cash_only_at::'
+AGENT_CASH_ONLY_REASON_KEY_PREFIX = 'agent_cash_only_reason::'
 BENCHMARK_HISTORY_LIMIT = 288
 BENCHMARK_HISTORY_MIN_INTERVAL_SECONDS = 240
+BENCHMARK_CHECK_INTERVAL_DAYS = 30
 AGENT_HISTORY_KEY_PREFIX = 'agent_history::'
 AGENT_HISTORY_LIMIT = 432
 AGENT_HISTORY_MIN_INTERVAL_SECONDS = 240
 AGENT_CASH_HISTORY_LIMIT = 720
 AGENT_HOLDINGS_HISTORY_LIMIT = 720
+FINAL_ORDER_STATUS_FRAGMENTS = ('CANCEL', 'FAIL', 'REJECT', 'DELETE', 'DISABLE')
+BROKER_CASH_ERROR_FRAGMENTS = (
+    'insufficient',
+    'not enough cash',
+    'not enough buying power',
+    'buying power',
+    'available funds',
+    'funds are insufficient',
+    'cash is not enough',
+    'exceed cash',
+)
 _ADAPTER_CACHE_LOCK = Lock()
 _ADAPTER_CACHE: dict[tuple[object, ...], BrokerAdapter] = {}
 
@@ -63,6 +82,7 @@ BASELINE_COMPANIES = [
         'total_score': 9.3,
         'rationale': 'GPU and accelerated-computing bottleneck at the center of AI training and inference demand.',
         'is_approved': True,
+        'approval_source': 'baseline',
     },
     {
         'symbol': 'US.ANET',
@@ -232,6 +252,104 @@ def get_active_mode(db: Session, settings: Settings) -> str:
     return get_setting_value(db, 'app_mode', settings.app_mode)
 
 
+def get_leader_bonus_award(db: Session) -> tuple[str, float]:
+    recipient = get_setting_value(db, LEADER_BONUS_RECIPIENT_KEY, '').strip()
+    amount = _parse_float_setting(get_setting_value(db, LEADER_BONUS_AMOUNT_KEY, ''))
+    return recipient, round(max(float(amount or 0.0), 0.0), 2)
+
+
+def _agent_bonus_total_key(agent_slug: str) -> str:
+    return f'{AGENT_BONUS_TOTAL_KEY_PREFIX}{agent_slug}'
+
+
+def get_agent_bonus_total(db: Session, agent_slug: str) -> float:
+    amount = _parse_float_setting(get_setting_value(db, _agent_bonus_total_key(agent_slug), ''))
+    if amount is not None:
+        return round(max(float(amount), 0.0), 2)
+
+    recipient, latest_amount = get_leader_bonus_award(db)
+    if recipient == agent_slug:
+        return latest_amount
+    return 0.0
+
+
+def _set_agent_bonus_total(db: Session, agent_slug: str, amount: float) -> float:
+    normalized = round(max(float(amount or 0.0), 0.0), 2)
+    set_setting_value(db, _agent_bonus_total_key(agent_slug), str(normalized))
+    db.flush()
+    return normalized
+
+
+def award_agent_bonus(db: Session, agent_slug: str, amount: float) -> float:
+    agent = db.get(StrategyAgent, agent_slug)
+    if agent is None:
+        raise ValueError(f'Unknown agent `{agent_slug}`.')
+    if not agent.is_enabled:
+        raise ValueError(f'Agent `{agent.name}` is disabled.')
+    if not agent.is_alive:
+        raise ValueError(f'Agent `{agent.name}` has already lost and cannot receive new capital.')
+
+    normalized = round(float(amount or 0.0), 2)
+    if normalized <= EPSILON:
+        raise ValueError('Bonus amount must be greater than zero.')
+
+    total_bonus = _set_agent_bonus_total(db, agent_slug, get_agent_bonus_total(db, agent_slug) + normalized)
+    set_setting_value(db, LEADER_BONUS_RECIPIENT_KEY, agent_slug)
+    set_setting_value(db, LEADER_BONUS_AMOUNT_KEY, str(normalized))
+    return total_bonus
+
+
+def get_agent_capital_bonus(db: Session, agent_slug: str) -> float:
+    return get_agent_bonus_total(db, agent_slug)
+
+
+def _agent_display_name(agent_slug: str) -> str:
+    labels = {
+        'liberated-us-stocks': 'Liberated US Stocks',
+        'pick-shovel-growth': 'Pick-and-Shovel Growth',
+    }
+    return labels.get(agent_slug, agent_slug.replace('-', ' ').title())
+
+
+def _format_bonus_amount(amount: float) -> str:
+    normalized = round(float(amount), 2)
+    if abs(normalized - round(normalized)) < EPSILON:
+        return f'${normalized:.0f}'
+    return f'${normalized:.2f}'
+
+
+def _backfill_agent_bonus_totals(db: Session) -> None:
+    recipient, latest_amount = get_leader_bonus_award(db)
+    if not recipient or latest_amount <= EPSILON:
+        return
+
+    existing_total = _parse_float_setting(get_setting_value(db, _agent_bonus_total_key(recipient), ''))
+    if existing_total is None:
+        _set_agent_bonus_total(db, recipient, latest_amount)
+
+
+def get_agent_note(agent_slug: str, benchmark_symbol: str, *, bonus_recipient: str = '', bonus_amount: float = 0.0) -> str:
+    base_notes = {
+        'pick-shovel-growth': f'Specialist agent. The first 90 days are a warm-up, then trailing {benchmark_symbol} at a monthly checkpoint triggers the benchmark penalty.',
+        'liberated-us-stocks': f'Flexible agent. The first 90 days are a warm-up, then trailing {benchmark_symbol} at a monthly checkpoint triggers the benchmark penalty.',
+    }
+    note = base_notes.get(agent_slug, f'After day 90, trailing {benchmark_symbol} at a monthly checkpoint triggers the benchmark penalty.')
+    if bonus_amount <= EPSILON or not bonus_recipient:
+        return note
+
+    formatted_bonus = _format_bonus_amount(bonus_amount)
+    if agent_slug == bonus_recipient:
+        return f'{note} This agent received an extra {formatted_bonus} because it was ahead when the latest capital award was made.'
+    return (
+        f'{note} This agent was behind when the latest capital award was made, '
+        f'so the extra {formatted_bonus} went to {_agent_display_name(bonus_recipient)} instead.'
+    )
+
+
+def get_agent_performance_value(db: Session, agent: StrategyAgent) -> float:
+    return max(float(agent.current_value) - get_agent_capital_bonus(db, agent.slug), 0.0)
+
+
 def get_runtime_settings(db: Session, settings: Settings) -> Settings:
     mode = get_active_mode(db, settings)
     updates: dict[str, object] = {}
@@ -246,6 +364,7 @@ def get_runtime_settings(db: Session, settings: Settings) -> Settings:
 
     if mode == 'live_capped':
         updates['risk_max_order_notional'] = min(settings.risk_max_order_notional, settings.live_capped_max_order_notional)
+        updates['quote_provider'] = 'broker'
 
     return settings.model_copy(update=updates) if updates else settings
 
@@ -622,12 +741,109 @@ def agent_excess_return_pct(agent: StrategyAgent, benchmark_return_pct: float | 
     return round(agent.total_return_pct - benchmark_return_pct, 2)
 
 
+def _agent_benchmark_checkpoint_key(agent_slug: str) -> str:
+    return f'{AGENT_BENCHMARK_CHECKPOINT_KEY_PREFIX}{agent_slug}'
+
+
+def _agent_cash_only_key(agent_slug: str) -> str:
+    return f'{AGENT_CASH_ONLY_KEY_PREFIX}{agent_slug}'
+
+
+def _agent_cash_only_at_key(agent_slug: str) -> str:
+    return f'{AGENT_CASH_ONLY_AT_KEY_PREFIX}{agent_slug}'
+
+
+def _agent_cash_only_reason_key(agent_slug: str) -> str:
+    return f'{AGENT_CASH_ONLY_REASON_KEY_PREFIX}{agent_slug}'
+
+
+def get_benchmark_warmup_end_at(agent: StrategyAgent) -> datetime:
+    return agent.created_at + timedelta(days=max(agent.competition_window_days, 1))
+
+
 def get_agent_window_cutoff(agent: StrategyAgent, now: datetime) -> datetime:
     return now - timedelta(days=max(agent.competition_window_days, 1))
 
 
 def get_elimination_ready_at(agent: StrategyAgent) -> datetime:
-    return agent.created_at + timedelta(days=max(agent.competition_window_days, 1))
+    return get_benchmark_warmup_end_at(agent)
+
+
+def get_agent_last_benchmark_checkpoint_at(db: Session, agent_slug: str) -> datetime | None:
+    return _parse_datetime_setting(get_setting_value(db, _agent_benchmark_checkpoint_key(agent_slug), ''))
+
+
+def set_agent_last_benchmark_checkpoint_at(db: Session, agent_slug: str, checkpoint_at: datetime) -> None:
+    set_setting_value(db, _agent_benchmark_checkpoint_key(agent_slug), checkpoint_at.isoformat())
+    db.flush()
+
+
+def is_agent_cash_only(db: Session, agent_slug: str) -> bool:
+    raw = get_setting_value(db, _agent_cash_only_key(agent_slug), '')
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def get_agent_cash_only_at(db: Session, agent_slug: str) -> datetime | None:
+    return _parse_datetime_setting(get_setting_value(db, _agent_cash_only_at_key(agent_slug), ''))
+
+
+def get_agent_cash_only_reason(db: Session, agent_slug: str) -> str | None:
+    raw = get_setting_value(db, _agent_cash_only_reason_key(agent_slug), '').strip()
+    return raw or None
+
+
+def set_agent_cash_only_state(
+    db: Session,
+    agent_slug: str,
+    enabled: bool,
+    *,
+    reason: str | None = None,
+    triggered_at: datetime | None = None,
+) -> None:
+    set_setting_value(db, _agent_cash_only_key(agent_slug), 'true' if enabled else 'false')
+    set_setting_value(db, _agent_cash_only_reason_key(agent_slug), (reason or '').strip())
+    set_setting_value(db, _agent_cash_only_at_key(agent_slug), triggered_at.isoformat() if enabled and triggered_at else '')
+    db.flush()
+
+
+def get_agent_latest_benchmark_checkpoint_at(agent: StrategyAgent, now: datetime) -> datetime | None:
+    warmup_end_at = get_benchmark_warmup_end_at(agent)
+    if now < warmup_end_at:
+        return None
+
+    elapsed_seconds = max((now - warmup_end_at).total_seconds(), 0.0)
+    interval_seconds = BENCHMARK_CHECK_INTERVAL_DAYS * 86400
+    completed_intervals = int(elapsed_seconds // interval_seconds)
+    return warmup_end_at + timedelta(days=completed_intervals * BENCHMARK_CHECK_INTERVAL_DAYS)
+
+
+def get_agent_due_benchmark_checkpoint_at(db: Session, agent: StrategyAgent, now: datetime) -> datetime | None:
+    latest_checkpoint_at = get_agent_latest_benchmark_checkpoint_at(agent, now)
+    if latest_checkpoint_at is None:
+        return None
+
+    last_checkpoint_at = get_agent_last_benchmark_checkpoint_at(db, agent.slug)
+    if last_checkpoint_at is not None and last_checkpoint_at >= latest_checkpoint_at:
+        return None
+    return latest_checkpoint_at
+
+
+def is_agent_benchmark_check_due(db: Session, agent: StrategyAgent, now: datetime) -> bool:
+    return get_agent_due_benchmark_checkpoint_at(db, agent, now) is not None
+
+
+def get_agent_next_benchmark_check_at(db: Session, agent: StrategyAgent, now: datetime) -> datetime:
+    warmup_end_at = get_benchmark_warmup_end_at(agent)
+    due_checkpoint_at = get_agent_due_benchmark_checkpoint_at(db, agent, now)
+    if due_checkpoint_at is not None:
+        return due_checkpoint_at
+    if now < warmup_end_at:
+        return warmup_end_at
+
+    latest_checkpoint_at = get_agent_latest_benchmark_checkpoint_at(agent, now)
+    if latest_checkpoint_at is None:
+        return warmup_end_at
+    return latest_checkpoint_at + timedelta(days=BENCHMARK_CHECK_INTERVAL_DAYS)
 
 
 def mark_agent_dead(agent: StrategyAgent, reason: str, death_round: int) -> None:
@@ -646,24 +862,25 @@ def revive_agent(agent: StrategyAgent) -> None:
     agent.death_round = None
 
 
-def update_agent_survival_state(agent: StrategyAgent) -> None:
-    starting_capital = max(agent.starting_capital, 1.0)
+def update_agent_survival_state(db: Session, agent: StrategyAgent) -> None:
+    starting_capital = max(float(agent.starting_capital), 1.0)
     current_value = max(agent.current_value, 0.0)
+    performance_value = get_agent_performance_value(db, agent)
     agent.current_value = current_value
-    agent.total_return_pct = round(((current_value - starting_capital) / starting_capital) * 100, 2)
+    agent.total_return_pct = round(((performance_value - starting_capital) / starting_capital) * 100, 2)
     agent.cash_buffer = round(agent.cash_buffer, 2)
     agent.performance_score = round(
         clamp(5.0 + ((agent.rolling_net_pnl / starting_capital) * 25.0), 0.0, 10.0),
         2,
     )
     agent.survival_score = round(
-        clamp(5.0 + (((current_value / starting_capital) - 1.0) * 20.0), 0.0, 10.0),
+        clamp(5.0 + (((performance_value / starting_capital) - 1.0) * 20.0), 0.0, 10.0),
         2,
     )
 
 
-def agent_competition_score(agent: StrategyAgent, benchmark_return_pct: float | None = None) -> float:
-    starting_capital = max(agent.starting_capital, 1.0)
+def agent_competition_score(db: Session, agent: StrategyAgent, benchmark_return_pct: float | None = None) -> float:
+    starting_capital = max(float(agent.starting_capital), 1.0)
     excess_return_pct = agent_excess_return_pct(agent, benchmark_return_pct)
     rolling_pct = (agent.rolling_net_pnl / starting_capital) * 100.0
     return (excess_return_pct * 0.55) + (rolling_pct * 0.25) + (agent.performance_score * 0.20)
@@ -681,7 +898,7 @@ def get_agent_trades(db: Session, limit: int = 50) -> list[AgentTrade]:
 
 def get_agent_cash(db: Session, agent: StrategyAgent) -> float:
     trades = db.scalars(select(AgentTrade).where(AgentTrade.agent_slug == agent.slug)).all()
-    cash = float(agent.starting_capital)
+    cash = float(agent.starting_capital) + get_agent_capital_bonus(db, agent.slug)
     for trade in trades:
         if trade.side == 'BUY':
             cash -= trade.notional
@@ -979,6 +1196,7 @@ def sync_agent_trades_from_orders(db: Session, settings: Settings) -> list[Agent
 
 def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool = True) -> list[StrategyAgent]:
     now = datetime.utcnow()
+    mode = get_active_mode(db, settings)
     benchmark_state = get_competition_benchmark_state(db, settings, refresh=False)
     benchmark_symbol = str(benchmark_state['symbol'])
     benchmark_return_pct = benchmark_state['return_pct']
@@ -1017,6 +1235,8 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
 
     solvent_agents: list[StrategyAgent] = []
     benchmark_failures: list[StrategyAgent] = []
+    live_capped_checkpoint_failures: list[StrategyAgent] = []
+    due_benchmark_checkpoints: dict[str, datetime] = {}
 
     for agent in agents:
         holdings = positions_by_agent.get(agent.slug, [])
@@ -1030,10 +1250,14 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
             holdings,
             now,
         )
-        agent.elimination_ready_at = get_elimination_ready_at(agent)
-        agent.is_eligible_for_elimination = now >= agent.elimination_ready_at
+        warmup_end_at = get_benchmark_warmup_end_at(agent)
+        agent.elimination_ready_at = warmup_end_at
+        agent.is_eligible_for_elimination = now >= warmup_end_at
+        due_checkpoint_at = get_agent_due_benchmark_checkpoint_at(db, agent, now)
+        if due_checkpoint_at is not None:
+            due_benchmark_checkpoints[agent.slug] = due_checkpoint_at
         agent.last_scored_at = now
-        update_agent_survival_state(agent)
+        update_agent_survival_state(db, agent)
         agent.updated_at = now
 
         if agent.current_value <= EPSILON:
@@ -1047,16 +1271,38 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
         revive_agent(agent)
         solvent_agents.append(agent)
 
-    if len(solvent_agents) > 1 and benchmark_return_pct is not None:
+    benchmark_checks_active = benchmark_return_pct is not None and (
+        (mode == 'live_capped' and len(solvent_agents) >= 1) or len(solvent_agents) > 1
+    )
+    if benchmark_checks_active:
         for agent in solvent_agents:
-            if agent.is_eligible_for_elimination and agent.total_return_pct + EPSILON < benchmark_return_pct:
+            if agent.slug not in due_benchmark_checkpoints:
+                continue
+            if agent.total_return_pct + EPSILON >= benchmark_return_pct:
+                continue
+            if mode == 'live_capped':
+                live_capped_checkpoint_failures.append(agent)
+            else:
                 benchmark_failures.append(agent)
 
-        if len(benchmark_failures) == 1:
+        if mode == 'live_capped':
+            for agent in live_capped_checkpoint_failures:
+                checkpoint_at = due_benchmark_checkpoints.get(agent.slug) or now
+                set_agent_cash_only_state(
+                    db,
+                    agent.slug,
+                    True,
+                    reason=(
+                        f'This agent trailed {benchmark_symbol} at the monthly benchmark check '
+                        f'({benchmark_return_pct:.2f}%) and was forced into cash.'
+                    ),
+                    triggered_at=checkpoint_at,
+                )
+        elif len(benchmark_failures) == 1:
             loser = benchmark_failures[0]
             mark_agent_dead(
                 loser,
-                f'After the warm-up window, this agent trailed {benchmark_symbol} at {benchmark_return_pct:.2f}% and lost the arena.',
+                f'At the monthly benchmark check after the warm-up window, this agent trailed {benchmark_symbol} at {benchmark_return_pct:.2f}% and lost the arena.',
                 trade_counts.get(loser.slug, 0),
             )
         elif len(benchmark_failures) > 1:
@@ -1070,9 +1316,43 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
             )[0]
             mark_agent_dead(
                 loser,
-                f'Both agents trailed {benchmark_symbol}. This agent had the weaker excess return and was eliminated.',
+                f'Both agents trailed {benchmark_symbol} at the monthly benchmark check. This agent had the weaker excess return and was eliminated.',
                 trade_counts.get(loser.slug, 0),
             )
+
+        for agent in solvent_agents:
+            checkpoint_at = due_benchmark_checkpoints.get(agent.slug)
+            if checkpoint_at is None:
+                continue
+            set_agent_last_benchmark_checkpoint_at(db, agent.slug, checkpoint_at)
+
+    if mode == 'live_capped':
+        runtime_settings = get_runtime_settings(db, settings)
+        adapter = build_broker_adapter(runtime_settings)
+        cash_only_agents = [agent for agent in solvent_agents if is_agent_cash_only(db, agent.slug)]
+        for agent in cash_only_agents:
+            _enforce_cash_only_agent(db, adapter, runtime_settings, agent)
+        for agent in cash_only_agents:
+            holdings = db.scalars(
+                select(AgentPosition).where(AgentPosition.agent_slug == agent.slug, AgentPosition.quantity > EPSILON)
+            ).all()
+            cash_value = get_agent_cash(db, agent)
+            market_value = round(sum(position.market_value for position in holdings), 2)
+            agent.cash_buffer = round(cash_value, 2)
+            agent.current_value = round(cash_value + market_value, 2)
+            (
+                agent.rolling_gains,
+                agent.rolling_losses,
+                agent.rolling_unrealized,
+                agent.rolling_net_pnl,
+            ) = calculate_agent_window_metrics(
+                db,
+                agent,
+                holdings,
+                now,
+            )
+            update_agent_survival_state(db, agent)
+            agent.updated_at = now
 
     agents = rebalance_strategy_agents(db, settings, commit=False)
     for agent in agents:
@@ -1109,9 +1389,9 @@ def rebalance_strategy_agents(db: Session, settings: Settings, *, commit: bool =
     if len(alive) == 1:
         sole = alive[0]
         sole.is_winner = True
-        sole.target_weight = 1.0
-        sole.allocated_capital = round(settings.risk_bankroll_cap, 2)
-        sole.reward_multiplier = round(sole.target_weight / max(sole.baseline_weight, 0.01), 2)
+        sole.target_weight = round(sole.baseline_weight, 4)
+        sole.allocated_capital = round(float(sole.starting_capital) + get_agent_capital_bonus(db, sole.slug), 2)
+        sole.reward_multiplier = round(sole.allocated_capital / max(sole.starting_capital, 0.01), 2)
         sole.updated_at = datetime.utcnow()
         if commit:
             db.commit()
@@ -1120,43 +1400,20 @@ def rebalance_strategy_agents(db: Session, settings: Settings, *, commit: bool =
     ranked = sorted(
         alive,
         key=lambda agent: (
-            agent_competition_score(agent, benchmark_return_pct),
+            agent_competition_score(db, agent, benchmark_return_pct),
             agent_excess_return_pct(agent, benchmark_return_pct),
             agent.current_value,
         ),
         reverse=True,
     )
     winner = ranked[0]
-    challenger = ranked[1]
-    winner_edge = agent_excess_return_pct(winner, benchmark_return_pct)
-    challenger_edge = agent_excess_return_pct(challenger, benchmark_return_pct)
-    diff = max(0.0, winner_edge - challenger_edge)
-    shift = clamp(diff / 25.0, 0.0, 0.35)
-
-    winner_target = clamp(
-        winner.baseline_weight + shift,
-        max(winner.min_weight, winner.baseline_weight),
-        winner.max_weight,
-    )
-    challenger_target = round(1.0 - winner_target, 4)
-
-    winner.is_winner = True
-    challenger.is_winner = False
-    winner.target_weight = round(winner_target, 4)
-    challenger.target_weight = round(challenger_target, 4)
-    winner.allocated_capital = round(settings.risk_bankroll_cap * winner.target_weight, 2)
-    challenger.allocated_capital = round(settings.risk_bankroll_cap * challenger.target_weight, 2)
-    winner.reward_multiplier = round(winner.target_weight / max(winner.baseline_weight, 0.01), 2)
-    challenger.reward_multiplier = round(challenger.target_weight / max(challenger.baseline_weight, 0.01), 2)
     now = datetime.utcnow()
-    winner.updated_at = now
-    challenger.updated_at = now
 
-    for agent in alive[2:]:
-        agent.is_winner = False
-        agent.target_weight = 0.0
-        agent.allocated_capital = 0.0
-        agent.reward_multiplier = 0.0
+    for agent in alive:
+        agent.is_winner = agent.slug == winner.slug
+        agent.target_weight = round(agent.baseline_weight, 4)
+        agent.allocated_capital = round(float(agent.starting_capital) + get_agent_capital_bonus(db, agent.slug), 2)
+        agent.reward_multiplier = round(agent.allocated_capital / max(agent.starting_capital, 0.01), 2)
         agent.updated_at = now
 
     if commit:
@@ -1169,6 +1426,9 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
     ensure_default_setting(db, 'agent_autopilot_enabled', 'true' if settings.agent_autopilot_enabled else 'false')
     ensure_default_setting(db, 'agent_autopilot_last_cycle_at', '')
     ensure_default_setting(db, 'agent_autopilot_last_summary', '')
+    ensure_default_setting(db, LEADER_BONUS_RECIPIENT_KEY, '')
+    ensure_default_setting(db, LEADER_BONUS_AMOUNT_KEY, '')
+    _backfill_agent_bonus_totals(db)
     ensure_default_setting(db, 'competition_benchmark_symbol', settings.competition_benchmark_symbol)
     ensure_default_setting(db, 'competition_benchmark_start_price', '')
     ensure_default_setting(db, 'competition_benchmark_current_price', '')
@@ -1176,7 +1436,11 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
     ensure_default_setting(db, BENCHMARK_START_AT_KEY, '')
     ensure_default_setting(db, BENCHMARK_HISTORY_KEY, '[]')
     benchmark_symbol = settings.competition_benchmark_symbol
-    benchmark_rule_message = f'Both agents compete for capital. After day 90, an agent that trails {benchmark_symbol} loses the arena.'
+    benchmark_rule_message = (
+        f'Both agents compete for capital. The first 90 days are a warm-up. '
+        f'After that, a monthly check against {benchmark_symbol} enforces the benchmark rule for each agent.'
+    )
+    bonus_recipient, bonus_amount = get_leader_bonus_award(db)
     if settings.moomoo_acc_id is not None and db.get(AppSetting, 'selected_acc_id') is None:
         db.add(AppSetting(key='selected_acc_id', value=str(settings.moomoo_acc_id)))
 
@@ -1220,7 +1484,12 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
                 'is_eligible_for_elimination': False,
                 'is_winner': False,
                 'is_alive': True,
-                'notes': f'Flexible agent. After day 90, trailing {benchmark_symbol} becomes elimination territory.',
+                'notes': get_agent_note(
+                    'liberated-us-stocks',
+                    benchmark_symbol,
+                    bonus_recipient=bonus_recipient,
+                    bonus_amount=bonus_amount,
+                ),
             },
             {
                 'slug': 'pick-shovel-growth',
@@ -1250,20 +1519,30 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
                 'is_eligible_for_elimination': False,
                 'is_winner': True,
                 'is_alive': True,
-                'notes': f'Specialist agent. After day 90, trailing {benchmark_symbol} becomes elimination territory.',
+                'notes': get_agent_note(
+                    'pick-shovel-growth',
+                    benchmark_symbol,
+                    bonus_recipient=bonus_recipient,
+                    bonus_amount=bonus_amount,
+                ),
             },
         ]
         for row in agent_rows:
             db.add(StrategyAgent(is_enabled=True, **row))
 
     existing_companies = {company.symbol: company for company in db.scalars(select(Company)).all()}
+    preserved_company_fields = {'is_approved', 'total_score'}
     for row in BASELINE_COMPANIES:
         existing_company = existing_companies.get(row['symbol'])
         if existing_company is None:
             db.add(Company(**row))
             continue
         for key, value in row.items():
+            if key in preserved_company_fields:
+                continue
             setattr(existing_company, key, value)
+        if not getattr(existing_company, 'approval_source', '').strip():
+            existing_company.approval_source = 'baseline'
 
     if db.scalar(select(Alert).limit(1)) is None:
         db.add(
@@ -1295,7 +1574,12 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
             'benchmark': settings.competition_benchmark_symbol,
             'allowed_universe': 'US_STOCKS',
             'competition_window_days': 90,
-            'notes': f'Specialist agent. After day 90, trailing {benchmark_symbol} becomes elimination territory.',
+            'notes': get_agent_note(
+                'pick-shovel-growth',
+                benchmark_symbol,
+                bonus_recipient=bonus_recipient,
+                bonus_amount=bonus_amount,
+            ),
         },
         'liberated-us-stocks': {
             'style': 'liberated',
@@ -1303,7 +1587,12 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
             'benchmark': settings.competition_benchmark_symbol,
             'allowed_universe': 'US_STOCKS',
             'competition_window_days': 90,
-            'notes': f'Flexible agent. After day 90, trailing {benchmark_symbol} becomes elimination territory.',
+            'notes': get_agent_note(
+                'liberated-us-stocks',
+                benchmark_symbol,
+                bonus_recipient=bonus_recipient,
+                bonus_amount=bonus_amount,
+            ),
         },
     }
     for slug, overrides in agent_overrides.items():
@@ -1464,15 +1753,95 @@ def sync_orders(db: Session, adapter: BrokerAdapter) -> list[BrokerOrder]:
 
 
 def refresh_broker_state(db: Session, adapter: BrokerAdapter, settings: Settings) -> None:
+    runtime_settings = get_runtime_settings(db, settings)
     sync_broker_accounts(db, adapter)
     sync_positions(db, adapter)
     sync_orders(db, adapter)
     sync_agent_trades_from_orders(db, settings)
-    get_competition_benchmark_state(db, settings, refresh=True)
+    get_competition_benchmark_state(db, runtime_settings, refresh=True)
     refresh_strategy_game_state(db, settings)
 
 
-def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, ticket: PaperOrderTicket) -> BrokerOrder:
+def _broker_order_is_pending(order: BrokerOrder) -> bool:
+    status = (order.status or '').upper()
+    if any(fragment in status for fragment in FINAL_ORDER_STATUS_FRAGMENTS):
+        return False
+    if order.quantity > 0 and order.filled_quantity >= order.quantity:
+        return False
+    return True
+
+
+def _preferred_execution_price(adapter: BrokerAdapter, symbol: str, side: str, fallback: float) -> float:
+    try:
+        quote = adapter.get_quote(symbol)
+    except Exception:
+        return round(max(float(fallback), 0.01), 2)
+
+    normalized_side = side.strip().upper()
+    if normalized_side == 'BUY':
+        preferred = quote.ask_price or quote.last_price or quote.bid_price
+    else:
+        preferred = quote.bid_price or quote.last_price or quote.ask_price
+    return round(max(float(preferred or fallback), 0.01), 2)
+
+
+def _looks_like_broker_cash_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(fragment in normalized for fragment in BROKER_CASH_ERROR_FRAGMENTS)
+
+
+def _persist_broker_order_record(
+    db: Session,
+    *,
+    agent: StrategyAgent,
+    broker_order,
+) -> BrokerOrder:
+    order = BrokerOrder(
+        order_id=broker_order.order_id,
+        symbol=broker_order.symbol,
+        agent_slug=agent.slug,
+        side=broker_order.side,
+        order_type=broker_order.order_type,
+        status=broker_order.status,
+        quantity=broker_order.quantity,
+        price=broker_order.price,
+        filled_quantity=broker_order.filled_quantity,
+        average_fill_price=broker_order.average_fill_price,
+        trading_env=broker_order.trading_env,
+        remark=broker_order.remark,
+        raw_payload=json_dump(broker_order.raw_payload or {}),
+    )
+    db.merge(order)
+    db.flush()
+
+    if (
+        order.filled_quantity > 0
+        and order.status.strip().upper() in FILLED_ORDER_STATUSES
+        and db.scalar(select(AgentTrade).where(AgentTrade.order_id == order.order_id)) is None
+    ):
+        apply_trade_to_agent(
+            db,
+            agent,
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.filled_quantity,
+            price=order.average_fill_price or order.price,
+            notes=order.remark or 'Paper order fill recorded in agent ledger.',
+            enforce_cash_limits=False,
+        )
+
+    return db.get(BrokerOrder, broker_order.order_id)
+
+
+def _submit_agent_order(
+    db: Session,
+    adapter: BrokerAdapter,
+    settings: Settings,
+    ticket: PaperOrderTicket,
+    *,
+    refresh_state: bool,
+) -> BrokerOrder:
     mode = get_active_mode(db, settings)
     if mode == 'paused':
         raise ValueError('App mode is paused. Switch to paper or live capped before submitting orders.')
@@ -1491,64 +1860,96 @@ def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, 
     if not agent.is_alive:
         raise ValueError(f'Agent `{agent.name}` has already lost and can no longer trade.')
     if mode == 'live_capped':
-        allowed_slug = get_live_capped_agent_slug(settings)
-        if ticket.agent_slug != allowed_slug:
-            allowed_agent = db.get(StrategyAgent, allowed_slug)
-            allowed_name = allowed_agent.name if allowed_agent is not None else allowed_slug
-            raise ValueError(f'Live capped mode only allows orders for `{allowed_name}`.')
         if settings.broker_backend.lower() == 'moomoo' and settings.moomoo_trd_env != 'REAL':
             raise ValueError('Live capped mode requires MOOMOO_LIVE_TRD_ENV=REAL.')
-    if ticket.quantity * ticket.limit_price > settings.risk_max_order_notional:
+        if ticket.side.strip().upper() == 'BUY' and is_agent_cash_only(db, agent.slug):
+            raise ValueError(f'Agent `{agent.name}` is locked to cash after trailing SPY at a monthly checkpoint.')
+
+    execution_price = float(ticket.limit_price)
+    if mode == 'live_capped':
+        execution_price = _preferred_execution_price(adapter, symbol, ticket.side, execution_price)
+
+    execution_ticket = PaperOrderTicket(
+        symbol=symbol,
+        agent_slug=agent.slug,
+        quantity=ticket.quantity,
+        limit_price=execution_price,
+        side=ticket.side.strip().upper(),
+        remark=ticket.remark,
+    )
+
+    if execution_ticket.side == 'BUY' and execution_ticket.quantity * execution_ticket.limit_price > settings.risk_max_order_notional:
         raise ValueError(
             f'Order notional exceeds max per-order limit of ${settings.risk_max_order_notional:.2f}.'
         )
 
-    if ticket.side.strip().upper() == 'BUY' and (ticket.quantity * ticket.limit_price) > get_agent_cash(db, agent) + EPSILON:
+    if execution_ticket.side == 'BUY' and (execution_ticket.quantity * execution_ticket.limit_price) > get_agent_cash(db, agent) + EPSILON:
         raise ValueError(
             f'Agent `{agent.name}` does not have enough allocated cash for this order.'
         )
 
-    broker_order = adapter.submit_paper_order(ticket)
-    order = BrokerOrder(
-        order_id=broker_order.order_id,
-        symbol=broker_order.symbol,
-        agent_slug=ticket.agent_slug,
-        side=broker_order.side,
-        order_type=broker_order.order_type,
-        status=broker_order.status,
-        quantity=broker_order.quantity,
-        price=broker_order.price,
-        filled_quantity=broker_order.filled_quantity,
-        average_fill_price=broker_order.average_fill_price,
-        trading_env=broker_order.trading_env,
-        remark=broker_order.remark,
-        raw_payload=json_dump(broker_order.raw_payload or {}),
-    )
-    db.merge(order)
-    db.flush()
+    try:
+        broker_order = adapter.submit_paper_order(execution_ticket)
+    except Exception as exc:
+        if execution_ticket.side == 'BUY' and _looks_like_broker_cash_error(str(exc)):
+            raise ValueError(
+                'Broker account does not have enough cash or buying power to execute this buy order.'
+            ) from exc
+        raise
+    order = _persist_broker_order_record(db, agent=agent, broker_order=broker_order)
 
-    if (
-        order.agent_slug is not None
-        and order.filled_quantity > 0
-        and order.status.strip().upper() in FILLED_ORDER_STATUSES
-        and db.scalar(select(AgentTrade).where(AgentTrade.order_id == order.order_id)) is None
-    ):
-        apply_trade_to_agent(
-            db,
-            agent,
-            order_id=order.order_id,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.filled_quantity,
-            price=order.average_fill_price or order.price,
-            notes=order.remark or 'Paper order fill recorded in agent ledger.',
-            enforce_cash_limits=False,
-        )
+    if refresh_state:
+        get_competition_benchmark_state(db, settings, refresh=True)
+        refresh_strategy_game_state(db, settings, commit=False)
+        db.commit()
+    return order
 
-    get_competition_benchmark_state(db, settings, refresh=True)
-    refresh_strategy_game_state(db, settings, commit=False)
-    db.commit()
-    return db.get(BrokerOrder, broker_order.order_id)
+
+def _enforce_cash_only_agent(db: Session, adapter: BrokerAdapter, settings: Settings, agent: StrategyAgent) -> None:
+    pending_sell_symbols: set[str] = set()
+    pending_orders = db.scalars(select(BrokerOrder).where(BrokerOrder.agent_slug == agent.slug)).all()
+    for order in pending_orders:
+        if not _broker_order_is_pending(order):
+            continue
+        side = (order.side or '').upper()
+        if side == 'SELL':
+            pending_sell_symbols.add(order.symbol)
+            continue
+        if side == 'BUY':
+            try:
+                adapter.cancel_order(order.order_id)
+            except Exception:
+                continue
+            order.status = 'CANCELLED'
+            order.updated_at = datetime.utcnow()
+
+    holdings = db.scalars(
+        select(AgentPosition).where(AgentPosition.agent_slug == agent.slug, AgentPosition.quantity > EPSILON)
+    ).all()
+    for position in holdings:
+        if position.symbol in pending_sell_symbols:
+            continue
+        try:
+            _submit_agent_order(
+                db,
+                adapter,
+                settings,
+                PaperOrderTicket(
+                    symbol=position.symbol,
+                    agent_slug=agent.slug,
+                    quantity=position.quantity,
+                    limit_price=max(position.market_price, position.average_cost, 0.01),
+                    side='SELL',
+                    remark='Monthly SPY checkpoint forced this agent to hold cash only.',
+                ),
+                refresh_state=False,
+            )
+        except Exception:
+            continue
+
+
+def submit_paper_order(db: Session, adapter: BrokerAdapter, settings: Settings, ticket: PaperOrderTicket) -> BrokerOrder:
+    return _submit_agent_order(db, adapter, settings, ticket, refresh_state=True)
 
 
 StrategySleeve = StrategyAgent

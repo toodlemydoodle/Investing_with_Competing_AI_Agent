@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from datetime import timedelta
 from functools import lru_cache
 from html import unescape
 from typing import Any
@@ -27,6 +28,8 @@ from app.models.entities import Decision
 from app.models.entities import ResearchNote
 from app.models.entities import StrategyAgent
 from app.services.quotes import get_quote_record
+from app.services.trading import get_competition_benchmark_state
+from app.services.trading import get_leader_bonus_award
 
 GOOGLE_NEWS_RSS = 'https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en'
 SEC_TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json'
@@ -40,6 +43,10 @@ GENERAL_MAX_SPREAD_PCT = 3.5
 DISCOVERY_MIN_PRICE = 8.0
 DISCOVERY_MIN_DOLLAR_VOLUME = 2_000_000.0
 DISCOVERY_MAX_SPREAD_PCT = 2.0
+APPROVAL_PROMOTION_STREAK = 2
+APPROVAL_DEMOTION_STREAK = 3
+APPROVAL_TRACKING_LOOKBACK_DAYS = 21
+COMPETITION_EPSILON = 1e-9
 
 
 
@@ -74,6 +81,19 @@ class MarketContext:
     day_volume: float
     dollar_volume: float
     trade_count: float
+
+
+@dataclass(slots=True)
+class CompetitionPressure:
+    benchmark_symbol: str
+    benchmark_return_gap_pct: float | None
+    opponent_name: str | None
+    opponent_return_gap_pct: float | None
+    missed_bonus: bool
+    received_bonus: bool
+    bonus_amount: float
+    aggression: float
+    discipline: float
 
 
 class ResearchError(RuntimeError):
@@ -124,6 +144,136 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def _format_dollar_amount(amount: float) -> str:
+    rounded = round(float(amount), 2)
+    if abs(rounded - round(rounded)) < COMPETITION_EPSILON:
+        return f'${rounded:.0f}'
+    return f'${rounded:.2f}'
+
+
+def _neutral_competition_pressure(benchmark_symbol: str) -> CompetitionPressure:
+    return CompetitionPressure(
+        benchmark_symbol=benchmark_symbol,
+        benchmark_return_gap_pct=None,
+        opponent_name=None,
+        opponent_return_gap_pct=None,
+        missed_bonus=False,
+        received_bonus=False,
+        bonus_amount=0.0,
+        aggression=0.0,
+        discipline=0.0,
+    )
+
+
+def _competition_pressure_map(db: Session, settings: Settings) -> dict[str, CompetitionPressure]:
+    benchmark_state = get_competition_benchmark_state(db, settings, refresh=False)
+    benchmark_symbol = str(benchmark_state.get('symbol') or settings.competition_benchmark_symbol)
+    benchmark_return_pct = benchmark_state.get('return_pct')
+    bonus_recipient, bonus_amount = get_leader_bonus_award(db)
+    active_agents = db.scalars(
+        select(StrategyAgent)
+        .where(StrategyAgent.is_enabled.is_(True), StrategyAgent.is_alive.is_(True))
+        .order_by(StrategyAgent.slug)
+    ).all()
+
+    pressure_by_agent: dict[str, CompetitionPressure] = {}
+    for agent in active_agents:
+        opponents = [other for other in active_agents if other.slug != agent.slug]
+        opponent = None
+        if opponents:
+            opponent = max(opponents, key=lambda other: (other.total_return_pct, other.current_value, other.slug))
+
+        benchmark_gap_pct = None
+        if benchmark_return_pct is not None:
+            benchmark_gap_pct = round(float(agent.total_return_pct) - float(benchmark_return_pct), 2)
+
+        opponent_gap_pct = None
+        if opponent is not None:
+            opponent_gap_pct = round(float(agent.total_return_pct) - float(opponent.total_return_pct), 2)
+
+        trailing_deficit = max(-(opponent_gap_pct or 0.0), 0.0)
+        benchmark_deficit = max(-(benchmark_gap_pct or 0.0), 0.0)
+        aggression = _clamp(
+            (0.55 if bonus_amount > COMPETITION_EPSILON and bonus_recipient and bonus_recipient != agent.slug else 0.0)
+            + min(trailing_deficit / 8.0, 0.45)
+            + min(benchmark_deficit / 8.0, 0.35),
+            0.0,
+            1.0,
+        )
+        discipline = _clamp(
+            (0.30 if bonus_amount > COMPETITION_EPSILON and bonus_recipient == agent.slug else 0.0)
+            + min(max(opponent_gap_pct or 0.0, 0.0) / 12.0, 0.35)
+            + (0.10 if (benchmark_gap_pct or 0.0) > 0 else 0.0),
+            0.0,
+            0.75,
+        )
+        pressure_by_agent[agent.slug] = CompetitionPressure(
+            benchmark_symbol=benchmark_symbol,
+            benchmark_return_gap_pct=benchmark_gap_pct,
+            opponent_name=opponent.name if opponent is not None else None,
+            opponent_return_gap_pct=opponent_gap_pct,
+            missed_bonus=bool(bonus_amount > COMPETITION_EPSILON and bonus_recipient and bonus_recipient != agent.slug),
+            received_bonus=bool(bonus_amount > COMPETITION_EPSILON and bonus_recipient == agent.slug),
+            bonus_amount=bonus_amount,
+            aggression=round(aggression, 3),
+            discipline=round(discipline, 3),
+        )
+
+    return pressure_by_agent
+
+
+def _competition_context_summary(pressure: CompetitionPressure) -> str:
+    if pressure.aggression <= COMPETITION_EPSILON and pressure.discipline <= COMPETITION_EPSILON:
+        return ''
+
+    if pressure.aggression > pressure.discipline:
+        parts: list[str] = []
+        if pressure.opponent_name and pressure.opponent_return_gap_pct is not None and pressure.opponent_return_gap_pct < 0:
+            parts.append(f"trailing {pressure.opponent_name} by {abs(pressure.opponent_return_gap_pct):.1f} pts")
+        if pressure.benchmark_return_gap_pct is not None and pressure.benchmark_return_gap_pct < 0:
+            parts.append(f"trailing {pressure.benchmark_symbol} by {abs(pressure.benchmark_return_gap_pct):.1f} pts")
+        summary = 'Competition context: '
+        summary += ' and '.join(parts) if parts else 'the agent is behind.'
+        summary += '.'
+        if pressure.missed_bonus and pressure.opponent_name:
+            summary += (
+                f" The latest {_format_dollar_amount(pressure.bonus_amount)} bonus went to {pressure.opponent_name}, "
+                'so the strongest ideas get a modest urgency bump.'
+            )
+        else:
+            summary += ' The strongest ideas get a modest urgency bump.'
+        return summary
+
+    parts = []
+    if pressure.opponent_name and pressure.opponent_return_gap_pct is not None and pressure.opponent_return_gap_pct > 0:
+        parts.append(f"leading {pressure.opponent_name} by {pressure.opponent_return_gap_pct:.1f} pts")
+    if pressure.received_bonus:
+        parts.append(f"holding the latest {_format_dollar_amount(pressure.bonus_amount)} bonus")
+    summary = 'Competition context: '
+    summary += ' and '.join(parts) if parts else 'the agent is protecting its lead.'
+    summary += '. Marginal risk-taking is trimmed to defend the lead.'
+    return summary
+
+
+def _competition_adjusted_conviction(
+    conviction: float,
+    pressure: CompetitionPressure,
+    *,
+    is_held: bool,
+) -> float:
+    adjusted = conviction
+    if pressure.aggression > COMPETITION_EPSILON:
+        if conviction >= 7.5:
+            adjusted += 0.35 * pressure.aggression
+        elif conviction >= 6.8:
+            adjusted += 0.20 * pressure.aggression
+        elif conviction >= 6.2 and not is_held:
+            adjusted += 0.08 * pressure.aggression
+    elif pressure.discipline > COMPETITION_EPSILON and not is_held:
+        adjusted -= (0.18 if conviction <= 7.0 else 0.10) * pressure.discipline
+    return round(_clamp(adjusted, 0.0, 10.0), 2)
+
+
 def _safe_parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -164,9 +314,126 @@ def _source_domain(url: str | None) -> str | None:
     return host or None
 
 
-def _company_rows(db: Session) -> dict[str, Company]:
-    rows = db.scalars(select(Company).where(Company.is_approved.is_(True))).all()
+def _company_rows(db: Session, *, approved_only: bool = True) -> dict[str, Company]:
+    stmt = select(Company)
+    if approved_only:
+        stmt = stmt.where(Company.is_approved.is_(True))
+    rows = db.scalars(stmt).all()
     return {company.symbol: company for company in rows}
+
+
+def _tracked_specialist_symbols(company_map: dict[str, Company], now: datetime) -> list[str]:
+    cutoff = now - timedelta(days=APPROVAL_TRACKING_LOOKBACK_DAYS)
+    candidates = [
+        company
+        for company in company_map.values()
+        if (
+            company.theme_name.lower() in PICK_SHOVEL_THEME_NAMES
+            and not company.is_approved
+            and (
+                company.approval_source == 'dynamic'
+                or ((company.last_researched_at is not None) and company.last_researched_at >= cutoff)
+                or company.approval_positive_streak > 0
+            )
+        )
+    ]
+    candidates.sort(
+        key=lambda company: (
+            company.last_conviction_score,
+            company.total_score,
+            company.last_researched_at or datetime.min,
+        ),
+        reverse=True,
+    )
+    return [company.symbol for company in candidates]
+
+
+def _ensure_specialist_company_row(
+    db: Session,
+    company_map: dict[str, Company],
+    symbol: str,
+    profile: dict[str, Any],
+    rationale: str,
+) -> Company:
+    normalized = _normalize_symbol(symbol)
+    company = company_map.get(normalized)
+    base_score = round(_clamp(_to_float(profile.get('base_score'), 5.8), 0.0, 10.0), 2)
+    default_rationale = str(rationale or profile.get('rationale') or '').strip() or f'Specialist tracking candidate for {normalized}.'
+
+    if company is None:
+        company = Company(
+            symbol=normalized,
+            name=str(profile.get('name', _ticker_from_symbol(normalized)))[:200],
+            theme_name='Pick-and-Shovel Growth',
+            sector=str(profile.get('sector', 'Unknown'))[:120],
+            theme_linkage=base_score,
+            multi_winner_exposure=base_score,
+            bottleneck_or_differentiation=base_score,
+            growth_proof=base_score,
+            management_proof=base_score,
+            valuation_sanity=5.5,
+            total_score=base_score,
+            rationale=default_rationale,
+            is_approved=False,
+            approval_source='dynamic',
+        )
+        db.add(company)
+        db.flush()
+        company_map[normalized] = company
+        return company
+
+    if profile.get('name'):
+        company.name = str(profile.get('name'))[:200]
+    if profile.get('sector'):
+        company.sector = str(profile.get('sector'))[:120]
+    if default_rationale:
+        company.rationale = default_rationale
+    return company
+
+
+def _sync_specialist_company_state(
+    company: Company,
+    idea: CandidateIdea,
+    analysis: dict[str, Any],
+    now: datetime,
+    *,
+    passes_gate: bool,
+    is_held: bool,
+    settings: Settings,
+) -> None:
+    trend = analysis.get('trend') or {}
+    porter = analysis.get('porter') or {}
+    company.theme_name = 'Pick-and-Shovel Growth'
+    company.total_score = round(float(idea.conviction_score), 2)
+    company.last_conviction_score = round(float(idea.conviction_score), 2)
+    company.last_researched_at = now
+    company.rationale = str(idea.rationale or company.rationale or '').strip() or company.rationale
+    company.theme_linkage = round(_clamp(_to_float(trend.get('theme_heat'), idea.conviction_score), 0.0, 10.0), 2)
+    company.multi_winner_exposure = round(_clamp(_to_float(trend.get('capex_alignment'), idea.conviction_score), 0.0, 10.0), 2)
+    company.bottleneck_or_differentiation = round(_clamp(_to_float(trend.get('mission_criticality'), idea.conviction_score), 0.0, 10.0), 2)
+    company.growth_proof = round(_clamp(_to_float(trend.get('execution_readiness'), idea.conviction_score), 0.0, 10.0), 2)
+    company.management_proof = round(_clamp(_to_float(porter.get('overall'), idea.conviction_score), 0.0, 10.0), 2)
+
+    strong_signal = passes_gate and idea.conviction_score >= settings.research_min_buy_score
+    weak_signal = (not passes_gate) or idea.conviction_score < settings.research_min_hold_score
+
+    if strong_signal:
+        company.approval_positive_streak += 1
+        company.approval_negative_streak = 0
+    elif weak_signal and not is_held:
+        company.approval_negative_streak += 1
+        company.approval_positive_streak = 0
+    else:
+        company.approval_positive_streak = 0
+        company.approval_negative_streak = 0
+
+    if company.approval_positive_streak >= APPROVAL_PROMOTION_STREAK:
+        company.is_approved = True
+        if company.approval_source != 'baseline':
+            company.approval_source = 'dynamic'
+
+    if company.is_approved and company.approval_negative_streak >= APPROVAL_DEMOTION_STREAK and not is_held:
+        company.is_approved = False
 
 
 def _agent_position_symbols(db: Session, agent: StrategyAgent) -> list[str]:
@@ -608,6 +875,7 @@ def _build_liberated_rationale(
     conviction: float,
     rank_index: int,
     total_candidates: int,
+    pressure: CompetitionPressure,
 ) -> str:
     metrics = {
         'business quality': row.analysis['business_quality'],
@@ -629,6 +897,9 @@ def _build_liberated_rationale(
         parts.append(f"Approximate daily dollar volume is ${row.market.dollar_volume / 1_000_000:.1f}M.")
     if row.market.spread_pct is not None:
         parts.append(f'Observed spread is {row.market.spread_pct:.2f}%.')
+    competition_summary = _competition_context_summary(pressure)
+    if competition_summary:
+        parts.append(competition_summary)
     return ' '.join(parts)
 
 
@@ -637,6 +908,7 @@ def _finalize_liberated_candidates(
     held_symbols: set[str],
     settings: Settings,
     agent: StrategyAgent,
+    pressure: CompetitionPressure,
 ) -> list[CandidateEvidence]:
     if not rows:
         return rows
@@ -680,7 +952,12 @@ def _finalize_liberated_candidates(
             + row.analysis['trend_fit']
             + row.analysis['optionality']
         ) / 5.0
-        conviction = round(_clamp((dossier_average * 0.62) + (percentile * 3.6), 0.0, 10.0), 2)
+        base_conviction = round(_clamp((dossier_average * 0.62) + (percentile * 3.6), 0.0, 10.0), 2)
+        conviction = _competition_adjusted_conviction(
+            base_conviction,
+            pressure,
+            is_held=row.idea.symbol in held_symbols,
+        )
         if not row.analysis.get('passes_gate'):
             status = 'research-avoid'
         elif index < buy_slots and conviction >= settings.research_min_buy_score:
@@ -690,14 +967,14 @@ def _finalize_liberated_candidates(
         else:
             status = 'research-avoid'
 
-        target_weight = _candidate_target_weight(agent, conviction)
+        target_weight = _candidate_target_weight(agent, conviction, pressure)
         row.idea = CandidateIdea(
             symbol=row.idea.symbol,
             theme_name=row.idea.theme_name,
             target_weight=target_weight,
             max_notional=_candidate_max_notional(settings, agent, target_weight, row.market),
             conviction_score=conviction,
-            rationale=_build_liberated_rationale(agent, row, conviction, index, total),
+            rationale=_build_liberated_rationale(agent, row, conviction, index, total, pressure),
             status=status,
         )
 
@@ -804,11 +1081,15 @@ def _score_pick_shovel_candidate(
     notes: list[dict[str, Any]],
     company_row: Company | None,
     now: datetime,
+    pressure: CompetitionPressure,
+    *,
+    is_held: bool,
 ) -> tuple[float, str, dict[str, Any]]:
     signal = _pick_shovel_signal_profile(profile, company_row)
     porter = _pick_shovel_porter_forces(profile, market, notes, company_row, now)
     trend = _pick_shovel_trend_fit(profile, market, notes, company_row, now)
-    conviction = round(_clamp((porter['overall'] * 0.60) + (trend['overall'] * 0.40), 0.0, 10.0), 2)
+    base_conviction = round(_clamp((porter['overall'] * 0.60) + (trend['overall'] * 0.40), 0.0, 10.0), 2)
+    conviction = _competition_adjusted_conviction(base_conviction, pressure, is_held=is_held)
 
     porter_components = {key: value for key, value in porter.items() if key != 'overall'}
     trend_components = {key: value for key, value in trend.items() if key != 'overall'}
@@ -824,10 +1105,15 @@ def _score_pick_shovel_candidate(
         f"Specialist qualification came from {qualification_basis} with structural strength {signal['structural_strength']:.1f}/10 and mission criticality {signal['mission_criticality']:.1f}/10.",
         'That trend score is structural, not chart-based: it measures whether the theme is hot and whether the company supplies a mission-critical bottleneck inside it.',
     ]
+    if abs(conviction - base_conviction) >= 0.05:
+        rationale_parts.append(f'Competition pressure adjusted the live conviction from {base_conviction:.1f}/10 to {conviction:.1f}/10.')
     if market.dollar_volume > 0:
         rationale_parts.append(f"Approximate daily dollar volume is ${market.dollar_volume / 1_000_000:.1f}M.")
     if market.spread_pct is not None:
         rationale_parts.append(f'Observed spread is {market.spread_pct:.2f}%.')
+    competition_summary = _competition_context_summary(pressure)
+    if competition_summary:
+        rationale_parts.append(competition_summary)
 
     analysis = {'porter': porter, 'trend': trend}
     return conviction, ' '.join(rationale_parts).strip(), analysis
@@ -848,10 +1134,25 @@ def _research_status_priority(status: str) -> int:
     return {'research-buy': 3, 'research-hold': 2, 'research-watch': 1, 'research-avoid': 0}.get(status, 0)
 
 
-def _candidate_target_weight(agent: StrategyAgent, conviction: float) -> float:
+def _candidate_target_weight(
+    agent: StrategyAgent,
+    conviction: float,
+    pressure: CompetitionPressure | None = None,
+) -> float:
     if agent.slug == 'pick-shovel-growth':
-        return round(_clamp(0.10 + ((conviction - 6.0) * 0.03), 0.10, 0.26), 4)
-    return round(_clamp(0.07 + ((conviction - 5.5) * 0.025), 0.06, 0.22), 4)
+        base_weight = 0.10 + ((conviction - 6.0) * 0.03)
+        lower_bound = 0.10
+        upper_bound = 0.30
+    else:
+        base_weight = 0.07 + ((conviction - 5.5) * 0.025)
+        lower_bound = 0.06
+        upper_bound = 0.24
+
+    modifier = 1.0
+    if pressure is not None:
+        modifier += 0.15 * pressure.aggression
+        modifier -= 0.08 * pressure.discipline
+    return round(_clamp(base_weight * modifier, lower_bound, upper_bound), 4)
 
 
 def _research_universe(
@@ -859,11 +1160,21 @@ def _research_universe(
     settings: Settings,
     agent: StrategyAgent,
     company_map: dict[str, Company],
+    now: datetime,
 ) -> tuple[list[str], dict[str, dict[str, str]]]:
     holdings = _agent_position_symbols(db, agent)
     discoveries = _current_feed_discoveries(settings, limit=max(6, settings.research_max_symbols_per_agent * 3))
     discovered_meta = {item['symbol']: item for item in discoveries}
-    approved_symbols = list(company_map.keys())
+    if agent.slug == 'pick-shovel-growth':
+        approved_symbols = [
+            symbol
+            for symbol, company in company_map.items()
+            if company.is_approved and company.theme_name.lower() in PICK_SHOVEL_THEME_NAMES
+        ]
+        tracked_symbols = _tracked_specialist_symbols(company_map, now)
+    else:
+        approved_symbols = [symbol for symbol, company in company_map.items() if company.is_approved]
+        tracked_symbols = []
 
     ordered: list[str] = []
     for symbol in holdings:
@@ -875,9 +1186,12 @@ def _research_universe(
     for symbol in approved_symbols:
         if symbol not in ordered:
             ordered.append(symbol)
+    for symbol in tracked_symbols:
+        if symbol not in ordered:
+            ordered.append(symbol)
 
     if agent.slug == 'pick-shovel-growth':
-        limit = max(len(holdings) + 4, settings.research_max_symbols_per_agent * 3)
+        limit = max(len(holdings) + 6, settings.research_max_symbols_per_agent * 4)
     else:
         limit = max(len(holdings) + 2, settings.research_max_symbols_per_agent * 2)
     return ordered[:limit], discovered_meta
@@ -888,12 +1202,15 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
             select(StrategyAgent).where(StrategyAgent.is_enabled.is_(True), StrategyAgent.is_alive.is_(True)).order_by(StrategyAgent.slug)
         ).all()
 
-    company_map = _company_rows(db)
+    company_map = _company_rows(db, approved_only=False)
     generated: dict[str, list[Decision]] = {}
     now = datetime.utcnow()
+    competition_pressure = _competition_pressure_map(db, settings)
+    benchmark_symbol = settings.competition_benchmark_symbol
 
     for agent in agents:
-        symbols, discovered_meta = _research_universe(db, settings, agent, company_map)
+        pressure = competition_pressure.get(agent.slug, _neutral_competition_pressure(benchmark_symbol))
+        symbols, discovered_meta = _research_universe(db, settings, agent, company_map, now)
         held_symbols = set(_agent_position_symbols(db, agent))
         evidence_rows: list[CandidateEvidence] = []
 
@@ -933,14 +1250,24 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
             theme_name = str(profile.get('theme_name', agent.name))
 
             if agent.slug == 'pick-shovel-growth':
-                conviction, rationale, analysis = _score_pick_shovel_candidate(agent, symbol, profile, market, notes, company_row, now)
+                conviction, rationale, analysis = _score_pick_shovel_candidate(
+                    agent,
+                    symbol,
+                    profile,
+                    market,
+                    notes,
+                    company_row,
+                    now,
+                    pressure,
+                    is_held=symbol in held_symbols,
+                )
                 if passes_gate and symbol in held_symbols and conviction >= settings.research_min_hold_score:
                     status = 'research-hold'
                 elif passes_gate and conviction >= settings.research_min_buy_score:
                     status = 'research-buy'
                 else:
                     status = 'research-avoid'
-                target_weight = _candidate_target_weight(agent, conviction)
+                target_weight = _candidate_target_weight(agent, conviction, pressure)
                 idea = CandidateIdea(
                     symbol=symbol,
                     theme_name=theme_name,
@@ -975,8 +1302,19 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
             )
 
         if agent.slug == 'liberated-us-stocks':
-            evidence_rows = _finalize_liberated_candidates(evidence_rows, held_symbols, settings, agent)
+            evidence_rows = _finalize_liberated_candidates(evidence_rows, held_symbols, settings, agent, pressure)
         else:
+            for row in evidence_rows:
+                company = _ensure_specialist_company_row(db, company_map, row.idea.symbol, row.profile, row.idea.rationale)
+                _sync_specialist_company_state(
+                    company,
+                    row.idea,
+                    row.analysis,
+                    now,
+                    passes_gate=bool(row.analysis.get('passes_gate')),
+                    is_held=row.idea.symbol in held_symbols,
+                    settings=settings,
+                )
             evidence_rows.sort(
                 key=lambda row: (_research_status_priority(row.idea.status), row.idea.conviction_score),
                 reverse=True,

@@ -17,9 +17,9 @@ from app.services.trading import bootstrap_database
 from app.services.trading import build_broker_adapter
 from app.services.trading import get_active_mode
 from app.services.trading import get_agent_cash
-from app.services.trading import get_live_capped_agent_slug
 from app.services.trading import get_runtime_settings
 from app.services.trading import get_setting_value
+from app.services.trading import is_agent_cash_only
 from app.services.trading import refresh_broker_state
 from app.services.trading import set_setting_value
 from app.services.trading import submit_paper_order
@@ -159,20 +159,6 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         .where(StrategyAgent.is_enabled.is_(True), StrategyAgent.is_alive.is_(True))
         .order_by(StrategyAgent.is_winner.desc(), StrategyAgent.slug.asc())
     ).all()
-    if mode == 'live_capped':
-        allowed_slug = get_live_capped_agent_slug(runtime_settings)
-        alive_agents = [agent for agent in alive_agents if agent.slug == allowed_slug]
-        if not alive_agents:
-            result = {
-                'enabled': True,
-                'executed_orders': 0,
-                'events': ['Live capped mode only trades Pick-and-Shovel, but that agent is not currently eligible.'],
-                'last_cycle_at': now,
-            }
-            set_setting_value(db, 'agent_autopilot_last_cycle_at', now.isoformat())
-            set_setting_value(db, 'agent_autopilot_last_summary', result['events'][0])
-            db.commit()
-            return result
 
     refresh_live_research(db, runtime_settings, agents=alive_agents)
     research_by_agent = _research_decisions_by_agent(db)
@@ -202,6 +188,30 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         pending_symbols = pending_symbols_by_agent.setdefault(agent.slug, set())
         decisions = research_by_agent.get(agent.slug, [])
         decision_by_symbol = {decision.symbol: decision for decision in decisions}
+        cash_only = mode == 'live_capped' and is_agent_cash_only(db, agent.slug)
+
+        if cash_only:
+            liquidated = False
+            for position in sorted(agent_positions, key=lambda item: item.market_value, reverse=True):
+                if position.symbol in pending_symbols:
+                    continue
+                order = _sell_position(
+                    db,
+                    adapter,
+                    runtime_settings,
+                    agent,
+                    position,
+                    'cash-only benchmark lock',
+                )
+                executed_orders += 1
+                pending_symbols.add(position.symbol)
+                events.append(f'{agent.name} is cash-only and sold {position.symbol} at {order.price:.2f}.')
+                liquidated = True
+                break
+
+            if liquidated or agent_positions or executed_orders >= max_orders:
+                continue
+            continue
 
         exited = False
         for position in sorted(agent_positions, key=lambda item: item.unrealized_pl):

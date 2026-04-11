@@ -93,6 +93,11 @@ class Company(Base, TimestampMixin):
     total_score: Mapped[float] = mapped_column(Float, default=0)
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     is_approved: Mapped[bool] = mapped_column(Boolean, default=True)
+    approval_source: Mapped[str] = mapped_column(String(32), default='baseline')
+    approval_positive_streak: Mapped[int] = mapped_column(Integer, default=0)
+    approval_negative_streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_conviction_score: Mapped[float] = mapped_column(Float, default=0)
+    last_researched_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Decision(Base, TimestampMixin):

@@ -63,6 +63,12 @@ def _pause_autopilot_for_broker_failure(error_message: str) -> None:
         db.commit()
 
 
+def _run_autopilot_iteration(settings) -> None:
+    with SessionLocal() as db:
+        if get_autopilot_enabled(db, settings):
+            run_agent_autopilot_cycle(db, settings)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
@@ -75,9 +81,7 @@ async def lifespan(_: FastAPI):
         interval_seconds = max(30, settings.agent_autopilot_interval_seconds)
         while True:
             try:
-                with SessionLocal() as db:
-                    if get_autopilot_enabled(db, settings):
-                        run_agent_autopilot_cycle(db, settings)
+                await asyncio.to_thread(_run_autopilot_iteration, settings)
             except Exception as exc:
                 error_message = str(exc)
                 if _is_broker_auth_failure(error_message):
