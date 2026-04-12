@@ -24,3 +24,4 @@ backend/.broker-order-sync-cutoff.txt
 trader.db
 backend/trader.db
 *.db
+MMAPI4Python_10.1.6108/

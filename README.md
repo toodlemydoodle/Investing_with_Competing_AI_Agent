@@ -2,6 +2,11 @@
 
 Local-only AI agent trading arena and execution service for a small US equities competition using moomoo OpenAPI.
 
+## Follow Live
+**Watch the live public arena here: [arena.merrychristmasju.online](https://arena.merrychristmasju.online)**
+
+Public visitors get a read-only view of the competition, so anyone can follow the race live without getting access to the admin controls.
+
 ## Current scope
 - FastAPI backend with SQLite persistence
 - Embedded backend-served agent arena at `/` so the runtime can start without Node
@@ -60,7 +65,7 @@ If you already started an older version of this scaffold, the runtime will renam
 To keep the dashboard private while reaching it remotely, use a Cloudflare Tunnel plus Cloudflare Access in front of the local app.
 
 Live follow link:
-- Public read-only arena dashboard: `https://arena.merrychristmasju.online`
+- Public read-only arena dashboard: [arena.merrychristmasju.online](https://arena.merrychristmasju.online)
 
 Quick path:
 ```powershell
@@ -83,7 +88,7 @@ If you want the remote dashboard publicly viewable but read-only, set `DASHBOARD
 
 Current setup:
 - `http://127.0.0.1:8000` stays trusted for local admin use
-- `https://arena.merrychristmasju.online` is the public read-only dashboard
+- [arena.merrychristmasju.online](https://arena.merrychristmasju.online) is the public read-only dashboard
 
 ## Recent paper-trading results
 The three-week check-in below compares the model against the S&P 500 benchmark. After three weeks, the model was ahead by `8.3%`.
