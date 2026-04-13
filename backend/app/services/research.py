@@ -1191,10 +1191,50 @@ def _research_universe(
             ordered.append(symbol)
 
     if agent.slug == 'pick-shovel-growth':
-        limit = max(len(holdings) + 6, settings.research_max_symbols_per_agent * 4)
+        limit = max(len(holdings) + 10, settings.research_specialist_symbol_limit)
     else:
-        limit = max(len(holdings) + 2, settings.research_max_symbols_per_agent * 2)
+        limit = max(len(holdings) + 4, settings.research_general_symbol_limit)
     return ordered[:limit], discovered_meta
+
+
+def _external_research_limit(settings: Settings, agent: StrategyAgent) -> int:
+    if agent.slug == 'pick-shovel-growth':
+        return max(settings.research_specialist_external_symbol_limit, 1)
+    return max(settings.research_general_external_symbol_limit, 1)
+
+
+def _append_watchlist_candidates(
+    selected: list[CandidateEvidence],
+    evidence_rows: list[CandidateEvidence],
+    held_symbols: set[str],
+    settings: Settings,
+) -> list[CandidateEvidence]:
+    watch_limit = max(settings.research_watchlist_limit, 0)
+    if watch_limit == 0:
+        return selected
+
+    watch_count = 0
+    for row in evidence_rows:
+        if row in selected or row.idea.symbol in held_symbols:
+            continue
+        if not row.analysis.get('passes_gate'):
+            continue
+        if row.idea.conviction_score < max(settings.research_min_hold_score - 0.8, 4.0):
+            continue
+        row.idea = CandidateIdea(
+            symbol=row.idea.symbol,
+            theme_name=row.idea.theme_name,
+            target_weight=row.idea.target_weight,
+            max_notional=row.idea.max_notional,
+            conviction_score=row.idea.conviction_score,
+            rationale=row.idea.rationale,
+            status='research-watch',
+        )
+        selected.append(row)
+        watch_count += 1
+        if watch_count >= watch_limit:
+            break
+    return selected
 
 def refresh_live_research(db: Session, settings: Settings, agents: list[StrategyAgent] | None = None, *, commit: bool = True) -> dict[str, list[Decision]]:
     if agents is None:
@@ -1213,6 +1253,8 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
         symbols, discovered_meta = _research_universe(db, settings, agent, company_map, now)
         held_symbols = set(_agent_position_symbols(db, agent))
         evidence_rows: list[CandidateEvidence] = []
+        external_research_limit = _external_research_limit(settings, agent)
+        externally_researched_symbols: set[str] = set()
 
         for symbol in symbols:
             profile = _symbol_profile(symbol, company_map, discovered_meta)
@@ -1223,10 +1265,14 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
 
             market = _market_context_from_quote(quote)
             should_fetch_external = settings.research_enabled and (
-                symbol in held_symbols or symbol in discovered_meta or len(evidence_rows) < 3
+                symbol in held_symbols
+                or symbol in discovered_meta
+                or len(externally_researched_symbols) < external_research_limit
             )
             news_notes = _news_notes_for_symbol(settings, symbol, str(profile.get('name', _ticker_from_symbol(symbol))), now) if should_fetch_external else []
             filing_notes = _filing_notes_for_symbol(settings, symbol, now) if should_fetch_external else []
+            if should_fetch_external:
+                externally_researched_symbols.add(symbol)
             discovered_note = None
             if symbol in discovered_meta:
                 discovered = discovered_meta[symbol]
@@ -1327,25 +1373,11 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
         for row in evidence_rows:
             if row.idea.symbol in held_symbols and row.idea.status == 'research-hold' and row not in selected:
                 selected.append(row)
-        decision_limit = max(settings.research_max_generated_decisions_per_agent, len(held_symbols) + 2)
-        fallback_target = min(decision_limit, max(2, len(held_symbols) + 1))
-        if len(selected) < fallback_target:
-            for row in evidence_rows:
-                if row in selected:
-                    continue
-                if row.idea.status == 'research-avoid':
-                    row.idea = CandidateIdea(
-                        symbol=row.idea.symbol,
-                        theme_name=row.idea.theme_name,
-                        target_weight=row.idea.target_weight,
-                        max_notional=row.idea.max_notional,
-                        conviction_score=row.idea.conviction_score,
-                        rationale=row.idea.rationale,
-                        status='research-watch',
-                    )
-                selected.append(row)
-                if len(selected) >= fallback_target:
-                    break
+        selected = _append_watchlist_candidates(selected, evidence_rows, held_symbols, settings)
+        decision_limit = max(
+            settings.research_max_generated_decisions_per_agent,
+            len(held_symbols) + settings.research_watchlist_limit + 1,
+        )
         selected = selected[:decision_limit]
 
         db.execute(delete(Decision).where(Decision.strategy_slug == agent.slug))

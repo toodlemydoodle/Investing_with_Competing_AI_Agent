@@ -226,9 +226,6 @@ class SettingsResponse(BaseModel):
     selected_acc_id: int | None
     agent_autopilot_enabled: bool
     agent_autopilot_interval_seconds: int
-    agent_max_orders_per_cycle: int
-    agent_take_profit_pct: float
-    agent_stop_loss_pct: float
     agent_autopilot_last_cycle_at: datetime | None = None
     agent_autopilot_last_summary: str | None = None
     competition_benchmark_symbol: str
@@ -238,15 +235,7 @@ class SettingsResponse(BaseModel):
     competition_benchmark_last_updated_at: datetime | None = None
     competition_benchmark_history: list[BenchmarkPointResponse] = Field(default_factory=list)
     research_enabled: bool
-    research_max_symbols_per_agent: int
-    research_max_generated_decisions_per_agent: int
-    research_min_buy_score: float
-    research_min_hold_score: float
     risk_bankroll_cap: float
-    risk_max_order_notional: float
-    risk_max_open_positions: int
-    risk_max_positions_per_theme: int
-    risk_daily_loss_limit: float
 
 
 class ModeUpdateRequest(BaseModel):
@@ -260,9 +249,6 @@ class AutopilotToggleRequest(BaseModel):
 class AutopilotStatusResponse(BaseModel):
     enabled: bool
     interval_seconds: int
-    max_orders_per_cycle: int
-    take_profit_pct: float
-    stop_loss_pct: float
     last_cycle_at: datetime | None = None
     last_summary: str | None = None
 

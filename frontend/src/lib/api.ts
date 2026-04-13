@@ -30,12 +30,33 @@ export type BrokerAccount = {
   is_selected: boolean;
 };
 
+export type AgentHistoryPoint = {
+  equity: number;
+  cash: number;
+  return_pct: number;
+  recorded_at: string;
+};
+
+export type AgentCashPoint = {
+  cash: number;
+  recorded_at: string;
+};
+
+export type AgentHoldingsPoint = {
+  holdings: number;
+  recorded_at: string;
+};
+
 export type Agent = {
   slug: string;
   name: string;
   style: string;
   mandate: string;
   benchmark: string;
+  allowed_universe: string;
+  starting_capital: number;
+  cash_buffer: number;
+  survival_floor: number;
   baseline_weight: number;
   min_weight: number;
   max_weight: number;
@@ -44,11 +65,99 @@ export type Agent = {
   current_value: number;
   total_return_pct: number;
   performance_score: number;
+  survival_score: number;
   reward_multiplier: number;
+  competition_window_days: number;
+  rolling_gains: number;
+  rolling_losses: number;
+  rolling_unrealized: number;
+  rolling_net_pnl: number;
+  is_eligible_for_elimination: boolean;
+  elimination_ready_at: string | null;
+  benchmark_warmup_ends_at: string | null;
+  next_benchmark_check_at: string | null;
+  benchmark_check_due: boolean;
+  is_cash_only: boolean;
+  cash_only_reason: string | null;
+  cash_only_at: string | null;
+  last_scored_at: string | null;
   is_winner: boolean;
+  is_alive: boolean;
   is_enabled: boolean;
+  death_round: number | null;
+  death_reason: string | null;
   notes: string;
+  history: AgentHistoryPoint[];
+  cash_history: AgentCashPoint[];
+  holdings_history: AgentHoldingsPoint[];
   updated_at: string;
+};
+
+export type AgentPosition = {
+  agent_slug: string;
+  symbol: string;
+  quantity: number;
+  average_cost: number;
+  market_price: number;
+  market_value: number;
+  realized_pl: number;
+  unrealized_pl: number;
+  last_trade_at: string | null;
+  updated_at: string;
+};
+
+export type AgentTrade = {
+  id: number;
+  agent_slug: string;
+  order_id: string | null;
+  symbol: string;
+  side: string;
+  quantity: number;
+  price: number;
+  notional: number;
+  realized_pl: number;
+  notes: string;
+  created_at: string;
+};
+
+export type ResearchNote = {
+  id: number;
+  agent_slug: string;
+  symbol: string;
+  source_type: string;
+  source_title: string;
+  source_url: string | null;
+  note_text: string;
+  note_score: number;
+  published_at: string | null;
+  created_at: string;
+};
+
+export type BenchmarkPoint = {
+  price: number;
+  recorded_at: string;
+};
+
+export type Settings = {
+  app_mode: string;
+  admin_controls_protected: boolean;
+  is_admin: boolean;
+  broker_backend: string;
+  quote_provider: string;
+  broker_environment: string;
+  selected_acc_id: number | null;
+  agent_autopilot_enabled: boolean;
+  agent_autopilot_interval_seconds: number;
+  agent_autopilot_last_cycle_at: string | null;
+  agent_autopilot_last_summary: string | null;
+  competition_benchmark_symbol: string;
+  competition_benchmark_start_price: number | null;
+  competition_benchmark_current_price: number | null;
+  competition_benchmark_return_pct: number | null;
+  competition_benchmark_last_updated_at: string | null;
+  competition_benchmark_history: BenchmarkPoint[];
+  research_enabled: boolean;
+  risk_bankroll_cap: number;
 };
 
 export type Position = {
@@ -110,23 +219,14 @@ export type Alert = {
   created_at: string;
 };
 
-export type Settings = {
-  app_mode: string;
-  broker_backend: string;
-  broker_environment: string;
-  selected_acc_id: number | null;
-  risk_bankroll_cap: number;
-  risk_max_order_notional: number;
-  risk_max_open_positions: number;
-  risk_max_positions_per_theme: number;
-  risk_daily_loss_limit: number;
-};
-
 export type DashboardOverview = {
   health: Health;
   broker_health: BrokerHealth;
   accounts: BrokerAccount[];
   agents: Agent[];
+  agent_positions: AgentPosition[];
+  agent_trades: AgentTrade[];
+  research_notes: ResearchNote[];
   positions: Position[];
   orders: BrokerOrder[];
   decisions: Decision[];
@@ -180,4 +280,17 @@ export async function submitPaperOrder(payload: {
   });
 }
 
+export async function toggleAutopilot(enabled: boolean): Promise<void> {
+  await request('/agents/autopilot', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+}
 
+export async function runAutopilotCycle(): Promise<{ executed_orders: number; events: string[] }> {
+  return request('/agents/cycle', { method: 'POST' });
+}
+
+export async function runResearch(): Promise<{ generated_decisions: number; generated_notes: number }> {
+  return request('/research/run', { method: 'POST' });
+}

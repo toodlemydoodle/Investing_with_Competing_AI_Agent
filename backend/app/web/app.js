@@ -318,9 +318,6 @@ function applyAdminLocks(data) {
   const researchButton = document.getElementById('run-research-button');
   if (researchButton) { researchButton.disabled = locked; }
 
-  const cycleButton = document.getElementById('run-cycle-button');
-  if (cycleButton) { cycleButton.disabled = locked; }
-
   const bankrollForm = document.getElementById('bankroll-bonus-form');
   if (bankrollForm) {
     bankrollForm.querySelectorAll('select, input, button').forEach((field) => {
@@ -1161,6 +1158,65 @@ function renderBroker(data) {
   `).join('');
 }
 
+function renderRiskSummary(data) {
+  const el = document.getElementById('risk-summary');
+  if (!el) { return; }
+  const s = data.settings;
+  el.innerHTML = [
+    ['Bankroll Cap', fmtMoney(s.risk_bankroll_cap)],
+    ['Research', s.research_enabled ? 'Enabled' : 'Disabled'],
+    ['Autopilot Interval', `${s.agent_autopilot_interval_seconds}s`],
+  ].map(([label, value]) => `<div><p class="eyebrow">${label}</p><strong>${value}</strong></div>`).join('');
+}
+
+function renderBrokerOrders(data) {
+  const el = document.getElementById('broker-orders');
+  if (!el) { return; }
+  const names = agentNameBySlug(data);
+  const orders = data.orders || [];
+  el.innerHTML = orders.length ? orders.map((order) => card(
+    order.symbol,
+    `${order.side} ${fmtShares(order.quantity)} @ ${fmtMoney(order.price)}`,
+    [
+      pill(order.side === 'BUY' ? 'ok' : 'warn', order.side),
+      pill('neutral', order.status),
+      `<span>${names[order.agent_slug] || order.agent_slug || '—'}</span>`,
+      `<span>${order.trading_env}</span>`,
+      `<span>${fmtDateTime(order.updated_at)}</span>`,
+    ]
+  )).join('') : '<p class="empty">No orders synced yet. Refresh broker state to populate.</p>';
+}
+
+function initTabNav() {
+  const buttons = document.querySelectorAll('.tab-btn[data-tab]');
+  const panels = document.querySelectorAll('.tab-panel');
+
+  function activateTab(tabId) {
+    buttons.forEach((btn) => {
+      const active = btn.dataset.tab === tabId;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle('hidden', panel.id !== `tab-${tabId}`);
+    });
+    try {
+      sessionStorage.setItem('arenaActiveTab', tabId);
+    } catch {}
+  }
+
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+  });
+
+  try {
+    const saved = sessionStorage.getItem('arenaActiveTab');
+    if (saved && document.getElementById(`tab-${saved}`)) {
+      activateTab(saved);
+    }
+  } catch {}
+}
+
 function populateAgentSelect(data) {
   const select = document.getElementById('agent-select');
   const submitButton = document.getElementById('submit-order');
@@ -1214,6 +1270,8 @@ function renderOverviewData(data) {
   renderPositions(data);
   renderCompanies(data);
   renderBroker(data);
+  renderRiskSummary(data);
+  renderBrokerOrders(data);
   renderAutopilot(data);
   populateAgentSelect(data);
   renderAdminPanel(data);
@@ -1227,6 +1285,7 @@ async function refreshOverview() {
 }
 
 async function init() {
+  initTabNav();
   const adminUnlockForm = document.getElementById('admin-unlock-form');
   if (adminUnlockForm) {
     adminUnlockForm.addEventListener('submit', async (event) => {
@@ -1299,16 +1358,6 @@ async function init() {
       showMessage('ok', `Research refreshed for ${result.generated_agents} agents.`);
     } catch (error) {
       showMessage('error', error.message || 'Research refresh failed.');
-    }
-  });
-
-  bindClick('run-cycle-button', async () => {
-    try {
-      const result = await request('/agents/cycle', { method: 'POST' });
-      await refreshOverview();
-      showMessage('ok', result.events[0] || 'Agent cycle completed.');
-    } catch (error) {
-      showMessage('error', error.message || 'Agent cycle failed.');
     }
   });
 

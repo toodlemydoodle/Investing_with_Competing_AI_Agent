@@ -19,7 +19,6 @@ from app.services.trading import get_active_mode
 from app.services.trading import get_agent_cash
 from app.services.trading import get_runtime_settings
 from app.services.trading import get_setting_value
-from app.services.trading import is_agent_cash_only
 from app.services.trading import refresh_broker_state
 from app.services.trading import set_setting_value
 from app.services.trading import submit_paper_order
@@ -53,9 +52,6 @@ def get_autopilot_status(db: Session, settings: Settings) -> dict[str, object]:
     return {
         'enabled': get_autopilot_enabled(db, settings),
         'interval_seconds': settings.agent_autopilot_interval_seconds,
-        'max_orders_per_cycle': settings.agent_max_orders_per_cycle,
-        'take_profit_pct': settings.agent_take_profit_pct,
-        'stop_loss_pct': settings.agent_stop_loss_pct,
         'last_cycle_at': last_cycle_at,
         'last_summary': last_summary,
     }
@@ -75,13 +71,6 @@ def _position_pnl_pct(position: AgentPosition, mark_price: float) -> float:
         return 0.0
     return ((mark_price - position.average_cost) / position.average_cost) * 100.0
 
-
-def _agent_slot_limit(settings: Settings, agent: StrategyAgent) -> int:
-    specialist_limit = 2
-    liberated_limit = min(4, settings.risk_max_open_positions)
-    if agent.slug == 'pick-shovel-growth':
-        return specialist_limit
-    return liberated_limit
 
 
 def _research_decisions_by_agent(db: Session) -> dict[str, list[Decision]]:
@@ -178,92 +167,38 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
 
     events: list[str] = []
     executed_orders = 0
-    max_orders = max(1, settings.agent_max_orders_per_cycle)
 
     for agent in alive_agents:
-        if executed_orders >= max_orders:
-            break
-
         agent_positions = positions_by_agent.get(agent.slug, [])
         pending_symbols = pending_symbols_by_agent.setdefault(agent.slug, set())
         decisions = research_by_agent.get(agent.slug, [])
         decision_by_symbol = {decision.symbol: decision for decision in decisions}
-        cash_only = mode == 'live_capped' and is_agent_cash_only(db, agent.slug)
-
-        if cash_only:
-            liquidated = False
-            for position in sorted(agent_positions, key=lambda item: item.market_value, reverse=True):
-                if position.symbol in pending_symbols:
-                    continue
-                order = _sell_position(
-                    db,
-                    adapter,
-                    runtime_settings,
-                    agent,
-                    position,
-                    'cash-only benchmark lock',
-                )
-                executed_orders += 1
-                pending_symbols.add(position.symbol)
-                events.append(f'{agent.name} is cash-only and sold {position.symbol} at {order.price:.2f}.')
-                liquidated = True
-                break
-
-            if liquidated or agent_positions or executed_orders >= max_orders:
-                continue
-            continue
 
         exited = False
         for position in sorted(agent_positions, key=lambda item: item.unrealized_pl):
             if position.symbol in pending_symbols:
                 continue
 
-            if agent.slug == 'liberated-us-stocks':
-                hold_decision = decision_by_symbol.get(position.symbol)
-                should_exit = hold_decision is None or hold_decision.status not in {'research-buy', 'research-hold'}
-                if should_exit:
-                    order = _sell_position(
-                        db,
-                        adapter,
-                        runtime_settings,
-                        agent,
-                        position,
-                        'liberated-agent thesis exit',
-                    )
-                    executed_orders += 1
-                    pending_symbols.add(position.symbol)
-                    events.append(
-                        f'{agent.name} sold {position.symbol} because current research no longer supports the position at {order.price:.2f}.'
-                    )
-                    exited = True
-                    break
+            hold_decision = decision_by_symbol.get(position.symbol)
+            thesis_gone = hold_decision is None or hold_decision.status not in {'research-buy', 'research-hold'}
+            if not thesis_gone:
                 continue
 
-            pnl_pct = _position_pnl_pct(position, position.market_price)
-            should_take_profit = pnl_pct >= settings.agent_take_profit_pct
-            should_stop_loss = pnl_pct <= -abs(settings.agent_stop_loss_pct)
-            if not should_take_profit and not should_stop_loss:
-                continue
             order = _sell_position(
                 db,
                 adapter,
                 runtime_settings,
                 agent,
                 position,
-                'pick-shovel constrained exit',
+                'thesis exit',
             )
             executed_orders += 1
             pending_symbols.add(position.symbol)
-            trigger = 'take-profit' if should_take_profit else 'stop-loss'
-            events.append(f'{agent.name} sold {position.symbol} via {trigger} at {order.price:.2f}.')
+            events.append(f'{agent.name} sold {position.symbol} — research no longer supports the position at {order.price:.2f}.')
             exited = True
             break
 
-        if exited or executed_orders >= max_orders:
-            continue
-
-        slot_limit = _agent_slot_limit(runtime_settings, agent)
-        if len(agent_positions) >= slot_limit:
+        if exited:
             continue
 
         cash = get_agent_cash(db, agent)
@@ -271,11 +206,9 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
         buy_candidates = [decision for decision in decisions if decision.status == 'research-buy']
 
         for decision in buy_candidates:
-            if executed_orders >= max_orders:
-                break
             if decision.symbol in held_symbols or decision.symbol in pending_symbols:
                 continue
-            if decision.max_notional <= 0 or cash <= 0:
+            if cash <= 0:
                 continue
             try:
                 quote = get_quote_record(runtime_settings, decision.symbol)
@@ -284,12 +217,12 @@ def run_agent_autopilot_cycle(db: Session, settings: Settings, *, force: bool = 
                 continue
             if price_hint <= 0:
                 continue
-            target_budget = min(
-                decision.max_notional,
-                cash,
-                max(agent.allocated_capital * decision.target_weight, price_hint),
-            )
+            target_budget = min(cash, max(decision.max_notional, price_hint))
             quantity = int(target_budget // price_hint)
+            if quantity < 1:
+                continue
+            if mode == 'live_capped' and round(quantity * price_hint, 2) > round(cash, 2):
+                quantity -= 1
             if quantity < 1:
                 continue
             order = submit_paper_order(

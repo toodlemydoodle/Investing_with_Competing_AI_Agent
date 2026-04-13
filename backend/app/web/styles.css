@@ -107,9 +107,57 @@ button, input, select { font: inherit; }
   align-items: stretch;
 }
 
+.grid.one { grid-template-columns: 1fr; }
 .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* ── Tab navigation ── */
+
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab-nav::-webkit-scrollbar { display: none; }
+
+.tab-btn {
+  border-radius: 12px 12px 0 0;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 10px 20px;
+  cursor: pointer;
+  position: relative;
+  transition: color 140ms ease, background 140ms ease;
+  white-space: nowrap;
+  box-shadow: none;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+  background: rgba(26, 33, 29, 0.04);
+  transform: none;
+  box-shadow: none;
+}
+
+.tab-btn.active {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: inset 0 -3px 0 var(--gold);
+}
+
+.tab-panel.hidden { display: none; }
 
 .panel,
 .stat,

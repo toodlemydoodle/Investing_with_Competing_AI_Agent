@@ -363,7 +363,6 @@ def get_runtime_settings(db: Session, settings: Settings) -> Settings:
             updates['moomoo_acc_id'] = settings.moomoo_paper_acc_id if settings.moomoo_paper_acc_id is not None else settings.moomoo_acc_id
 
     if mode == 'live_capped':
-        updates['risk_max_order_notional'] = min(settings.risk_max_order_notional, settings.live_capped_max_order_notional)
         updates['quote_provider'] = 'broker'
 
     return settings.model_copy(update=updates) if updates else settings
@@ -1196,10 +1195,6 @@ def sync_agent_trades_from_orders(db: Session, settings: Settings) -> list[Agent
 
 def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool = True) -> list[StrategyAgent]:
     now = datetime.utcnow()
-    mode = get_active_mode(db, settings)
-    benchmark_state = get_competition_benchmark_state(db, settings, refresh=False)
-    benchmark_symbol = str(benchmark_state['symbol'])
-    benchmark_return_pct = benchmark_state['return_pct']
     broker_prices = {
         position.symbol: position.market_price
         for position in db.scalars(select(Position)).all()
@@ -1233,11 +1228,6 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
     for trade in db.scalars(select(AgentTrade)).all():
         trade_counts[trade.agent_slug] = trade_counts.get(trade.agent_slug, 0) + 1
 
-    solvent_agents: list[StrategyAgent] = []
-    benchmark_failures: list[StrategyAgent] = []
-    live_capped_checkpoint_failures: list[StrategyAgent] = []
-    due_benchmark_checkpoints: dict[str, datetime] = {}
-
     for agent in agents:
         holdings = positions_by_agent.get(agent.slug, [])
         cash_value = get_agent_cash(db, agent)
@@ -1253,9 +1243,6 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
         warmup_end_at = get_benchmark_warmup_end_at(agent)
         agent.elimination_ready_at = warmup_end_at
         agent.is_eligible_for_elimination = now >= warmup_end_at
-        due_checkpoint_at = get_agent_due_benchmark_checkpoint_at(db, agent, now)
-        if due_checkpoint_at is not None:
-            due_benchmark_checkpoints[agent.slug] = due_checkpoint_at
         agent.last_scored_at = now
         update_agent_survival_state(db, agent)
         agent.updated_at = now
@@ -1269,90 +1256,6 @@ def refresh_strategy_game_state(db: Session, settings: Settings, *, commit: bool
             continue
 
         revive_agent(agent)
-        solvent_agents.append(agent)
-
-    benchmark_checks_active = benchmark_return_pct is not None and (
-        (mode == 'live_capped' and len(solvent_agents) >= 1) or len(solvent_agents) > 1
-    )
-    if benchmark_checks_active:
-        for agent in solvent_agents:
-            if agent.slug not in due_benchmark_checkpoints:
-                continue
-            if agent.total_return_pct + EPSILON >= benchmark_return_pct:
-                continue
-            if mode == 'live_capped':
-                live_capped_checkpoint_failures.append(agent)
-            else:
-                benchmark_failures.append(agent)
-
-        if mode == 'live_capped':
-            for agent in live_capped_checkpoint_failures:
-                checkpoint_at = due_benchmark_checkpoints.get(agent.slug) or now
-                set_agent_cash_only_state(
-                    db,
-                    agent.slug,
-                    True,
-                    reason=(
-                        f'This agent trailed {benchmark_symbol} at the monthly benchmark check '
-                        f'({benchmark_return_pct:.2f}%) and was forced into cash.'
-                    ),
-                    triggered_at=checkpoint_at,
-                )
-        elif len(benchmark_failures) == 1:
-            loser = benchmark_failures[0]
-            mark_agent_dead(
-                loser,
-                f'At the monthly benchmark check after the warm-up window, this agent trailed {benchmark_symbol} at {benchmark_return_pct:.2f}% and lost the arena.',
-                trade_counts.get(loser.slug, 0),
-            )
-        elif len(benchmark_failures) > 1:
-            loser = sorted(
-                benchmark_failures,
-                key=lambda agent: (
-                    agent_excess_return_pct(agent, benchmark_return_pct),
-                    agent.total_return_pct,
-                    agent.current_value,
-                ),
-            )[0]
-            mark_agent_dead(
-                loser,
-                f'Both agents trailed {benchmark_symbol} at the monthly benchmark check. This agent had the weaker excess return and was eliminated.',
-                trade_counts.get(loser.slug, 0),
-            )
-
-        for agent in solvent_agents:
-            checkpoint_at = due_benchmark_checkpoints.get(agent.slug)
-            if checkpoint_at is None:
-                continue
-            set_agent_last_benchmark_checkpoint_at(db, agent.slug, checkpoint_at)
-
-    if mode == 'live_capped':
-        runtime_settings = get_runtime_settings(db, settings)
-        adapter = build_broker_adapter(runtime_settings)
-        cash_only_agents = [agent for agent in solvent_agents if is_agent_cash_only(db, agent.slug)]
-        for agent in cash_only_agents:
-            _enforce_cash_only_agent(db, adapter, runtime_settings, agent)
-        for agent in cash_only_agents:
-            holdings = db.scalars(
-                select(AgentPosition).where(AgentPosition.agent_slug == agent.slug, AgentPosition.quantity > EPSILON)
-            ).all()
-            cash_value = get_agent_cash(db, agent)
-            market_value = round(sum(position.market_value for position in holdings), 2)
-            agent.cash_buffer = round(cash_value, 2)
-            agent.current_value = round(cash_value + market_value, 2)
-            (
-                agent.rolling_gains,
-                agent.rolling_losses,
-                agent.rolling_unrealized,
-                agent.rolling_net_pnl,
-            ) = calculate_agent_window_metrics(
-                db,
-                agent,
-                holdings,
-                now,
-            )
-            update_agent_survival_state(db, agent)
-            agent.updated_at = now
 
     agents = rebalance_strategy_agents(db, settings, commit=False)
     for agent in agents:
@@ -1878,15 +1781,15 @@ def _submit_agent_order(
         remark=ticket.remark,
     )
 
-    if execution_ticket.side == 'BUY' and execution_ticket.quantity * execution_ticket.limit_price > settings.risk_max_order_notional:
-        raise ValueError(
-            f'Order notional exceeds max per-order limit of ${settings.risk_max_order_notional:.2f}.'
-        )
-
-    if execution_ticket.side == 'BUY' and (execution_ticket.quantity * execution_ticket.limit_price) > get_agent_cash(db, agent) + EPSILON:
-        raise ValueError(
-            f'Agent `{agent.name}` does not have enough allocated cash for this order.'
-        )
+    if execution_ticket.side == 'BUY':
+        available_cash = get_agent_cash(db, agent)
+        order_cost = execution_ticket.quantity * execution_ticket.limit_price
+        cash_tolerance = 0.0 if mode == 'live_capped' else EPSILON
+        if order_cost > available_cash + cash_tolerance:
+            raise ValueError(
+                f'Agent `{agent.name}` does not have enough allocated cash for this order '
+                f'(${order_cost:.2f} > ${available_cash:.2f}).'
+            )
 
     try:
         broker_order = adapter.submit_paper_order(execution_ticket)

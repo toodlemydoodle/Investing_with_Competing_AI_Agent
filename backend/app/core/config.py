@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     research_filings_per_symbol: int = 3
     research_min_buy_score: float = 6.2
     research_min_hold_score: float = 5.4
+    research_general_symbol_limit: int = 24
+    research_specialist_symbol_limit: int = 64
+    research_general_external_symbol_limit: int = 6
+    research_specialist_external_symbol_limit: int = 14
+    research_watchlist_limit: int = 3
 
     risk_bankroll_cap: float = 1000.0
     risk_max_order_notional: float = 150.0

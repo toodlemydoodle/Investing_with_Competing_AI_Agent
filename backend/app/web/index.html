@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>moomoo AI Agent Arena</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260411-8" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260413-4" />
   </head>
   <body>
     <div class="page-noise"></div>
@@ -21,268 +21,324 @@
           <span class="signal-chip">Beat SPY Or De-Risk</span>
         </div>
       </header>
-      <section class="hero">
-        <article class="hero-copy panel panel-hero">
-          <div class="hero-copy-top">
-            <p class="eyebrow">Mission</p>
-            <span class="pill neutral">Agent vs Agent</span>
-          </div>
-          <h2>One specialist agent hunts picks-and-shovels. One liberated agent can roam any US-listed stock.</h2>
-          <p class="lede">
-            Both agents stay inside US stocks. The stronger one earns more capital. There is no benchmark penalty for the first 90 days, then US.SPY checks happen monthly.
-          </p>
-          <div class="hero-rules">
-            <div class="rule-card">
-              <p class="eyebrow">Rule 01</p>
-              <strong>Beat SPY</strong>
-              <span>There is no benchmark penalty for the first 90 days. After that, trailing US.SPY at a monthly checkpoint forces live-capped agents into cash and can eliminate paper agents.</span>
-            </div>
-            <div class="rule-card">
-              <p class="eyebrow">Rule 02</p>
-              <strong>Compete For Capital</strong>
-              <span>When a capital award is made, the current leader gets the bonus cash.</span>
-            </div>
-            <div class="rule-card">
-              <p class="eyebrow">Rule 03</p>
-              <strong>Stay Inside Scope</strong>
-              <span>Every order stays inside the US equity universe.</span>
-            </div>
-          </div>
-        </article>
 
-        <aside class="hero-actions panel panel-ops">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Control Deck</p>
-              <h2>Mode and Sync</h2>
+      <nav class="tab-nav" role="tablist" aria-label="Dashboard sections">
+        <button class="tab-btn active" data-tab="arena" role="tab" aria-selected="true">Arena</button>
+        <button class="tab-btn" data-tab="portfolio" role="tab" aria-selected="false">Portfolio</button>
+        <button class="tab-btn" data-tab="research" role="tab" aria-selected="false">Research</button>
+        <button class="tab-btn" data-tab="trades" role="tab" aria-selected="false">Trades</button>
+        <button class="tab-btn" data-tab="system" role="tab" aria-selected="false">System</button>
+      </nav>
+
+      <!-- ── Arena tab ── -->
+      <div class="tab-panel" id="tab-arena" role="tabpanel">
+        <section class="hero">
+          <article class="hero-copy panel panel-hero">
+            <div class="hero-copy-top">
+              <p class="eyebrow">Mission</p>
+              <span class="pill neutral">Agent vs Agent</span>
             </div>
-            <span id="mode-pill" class="pill neutral">paper</span>
-          </div>
-          <div class="button-row controls-row">
-            <button data-mode="paper">Paper</button>
-            <button data-mode="live_capped">Live Capped</button>
-            <button id="autopilot-toggle-button">Autopilot: Off</button>
-          </div>
-          <div id="admin-panel" class="admin-panel hidden">
-            <div class="admin-panel-copy">
-              <strong id="admin-status-label">Public read-only mode</strong>
-              <span id="admin-status-detail">Unlock admin controls to change runtime settings, submit orders, or award cash.</span>
-            </div>
-            <form id="admin-unlock-form" class="admin-form">
-              <label class="admin-form-field">
-                <span>Admin Token</span>
-                <input id="admin-token-input" type="password" autocomplete="current-password" placeholder="Enter admin token" />
-              </label>
-              <div class="button-row admin-form-actions">
-                <button id="admin-unlock-button" type="submit" class="primary">Unlock Admin</button>
-                <button id="admin-lock-button" type="button" class="hidden">Lock</button>
+            <h2>One specialist agent hunts picks-and-shovels. One liberated agent can roam any US-listed stock.</h2>
+            <p class="lede">
+              Both agents stay inside US stocks. The stronger one earns more capital. There is no benchmark penalty for the first 90 days, then US.SPY checks happen monthly.
+            </p>
+            <div class="hero-rules">
+              <div class="rule-card">
+                <p class="eyebrow">Rule 01</p>
+                <strong>Beat SPY</strong>
+                <span>There is no benchmark penalty for the first 90 days. After that, trailing US.SPY at a monthly checkpoint forces live-capped agents into cash and can eliminate paper agents.</span>
               </div>
+              <div class="rule-card">
+                <p class="eyebrow">Rule 02</p>
+                <strong>Compete For Capital</strong>
+                <span>When a capital award is made, the current leader gets the bonus cash.</span>
+              </div>
+              <div class="rule-card">
+                <p class="eyebrow">Rule 03</p>
+                <strong>Stay Inside Scope</strong>
+                <span>Every order stays inside the US equity universe.</span>
+              </div>
+            </div>
+          </article>
+
+          <aside class="hero-actions panel panel-ops">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Control Deck</p>
+                <h2>Mode and Sync</h2>
+              </div>
+              <span id="mode-pill" class="pill neutral">paper</span>
+            </div>
+            <div class="button-row controls-row">
+              <button data-mode="paper">Paper</button>
+              <button data-mode="live_capped">Live Capped</button>
+              <button id="autopilot-toggle-button">Autopilot: Off</button>
+            </div>
+            <div id="admin-panel" class="admin-panel hidden">
+              <div class="admin-panel-copy">
+                <strong id="admin-status-label">Public read-only mode</strong>
+                <span id="admin-status-detail">Unlock admin controls to change runtime settings, submit orders, or award cash.</span>
+              </div>
+              <form id="admin-unlock-form" class="admin-form">
+                <label class="admin-form-field">
+                  <span>Admin Token</span>
+                  <input id="admin-token-input" type="password" autocomplete="current-password" placeholder="Enter admin token" />
+                </label>
+                <div class="button-row admin-form-actions">
+                  <button id="admin-unlock-button" type="submit" class="primary">Unlock Admin</button>
+                  <button id="admin-lock-button" type="button" class="hidden">Lock</button>
+                </div>
+              </form>
+            </div>
+            <button id="refresh-button" class="text-link">Refresh Broker State</button>
+            <div id="autopilot-status" class="ops-note"></div>
+            <p class="ops-note">The dashboard loads from cached state first so the page stays responsive even if OpenD is slow.</p>
+            <p id="notice" class="banner ok hidden"></p>
+            <p id="error" class="banner error hidden"></p>
+          </aside>
+        </section>
+
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Arena Board</p>
+            <h2>Capital, benchmark gap, and current leading agent</h2>
+          </div>
+        </section>
+        <section id="stats" class="stats"></section>
+
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Core Loop</p>
+            <h2>Agents and competition state</h2>
+          </div>
+          <span id="winner-badge" class="pill neutral">waiting</span>
+        </section>
+        <section class="grid one">
+          <article class="panel panel-sleeves">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Agents</p>
+                <h2>Competition State</h2>
+              </div>
+            </div>
+            <div id="agents" class="stack"></div>
+          </article>
+        </section>
+      </div>
+
+      <!-- ── Portfolio tab ── -->
+      <div class="tab-panel hidden" id="tab-portfolio" role="tabpanel">
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Portfolio</p>
+            <h2>Agent holdings and broker positions</h2>
+          </div>
+        </section>
+        <section class="grid one">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Agent Ownership</p>
+                <h2>Virtual Holdings by Agent</h2>
+              </div>
+            </div>
+            <div id="positions" class="stack"></div>
+          </article>
+        </section>
+
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Ledger</p>
+            <h2>Virtual positions and trade events</h2>
+          </div>
+        </section>
+        <section class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Agent Ledger</p>
+                <h2>Virtual Holdings</h2>
+              </div>
+            </div>
+            <div id="agent-positions" class="stack"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Agent Ledger</p>
+                <h2>Recent Trade Events</h2>
+              </div>
+            </div>
+            <div id="agent-trades" class="stack"></div>
+          </article>
+        </section>
+      </div>
+
+      <!-- ── Research tab ── -->
+      <div class="tab-panel hidden" id="tab-research" role="tabpanel">
+        <section class="section-header section-header-with-action">
+          <div>
+            <p class="eyebrow">Research Queues</p>
+            <h2>Generated trade ideas by agent</h2>
+          </div>
+          <button id="run-research-button" class="section-action research-action">Run Research</button>
+        </section>
+        <section class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Live Research Queue</p>
+                <h2>Pick-and-Shovel Ideas</h2>
+              </div>
+            </div>
+            <div id="decisions-pick-shovel" class="stack"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Live Research Queue</p>
+                <h2>Liberated Ideas</h2>
+              </div>
+            </div>
+            <div id="decisions-liberated" class="stack"></div>
+          </article>
+        </section>
+
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Universe</p>
+            <h2>Approved US stocks</h2>
+          </div>
+        </section>
+        <section class="grid">
+          <article class="panel panel-universe">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Universe</p>
+                <h2>Approved US Stocks</h2>
+                <p class="panel-note">The Pick-and-Shovel universe can now evolve: approved names keep their live conviction score, strong specialist conviction can promote new symbols, and repeated weak unheld runs can remove them.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Name</th>
+                    <th>Theme</th>
+                    <th>Score</th>
+                  </tr>
+                </thead>
+                <tbody id="companies"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </div>
+
+      <!-- ── Trades tab ── -->
+      <div class="tab-panel hidden" id="tab-trades" role="tabpanel">
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Trades</p>
+            <h2>Order entry and execution history</h2>
+          </div>
+        </section>
+        <section class="grid two layout-main">
+          <article class="panel panel-order">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Order Ticket</p>
+                <h2>Submit Agent-Tagged Order</h2>
+              </div>
+              <span class="pill warn">Limit Orders</span>
+            </div>
+            <form id="order-form" class="order-form">
+              <label>
+                <span>Symbol</span>
+                <input name="symbol" value="US.NVDA" />
+              </label>
+              <label>
+                <span>Live Agent</span>
+                <select name="agent_slug" id="agent-select"></select>
+              </label>
+              <label>
+                <span>Quantity</span>
+                <input type="number" name="quantity" min="1" step="1" value="1" />
+              </label>
+              <label>
+                <span>Limit Price</span>
+                <input type="number" name="limit_price" min="0.01" step="0.01" value="100" />
+              </label>
+              <label>
+                <span>Side</span>
+                <select name="side">
+                  <option value="BUY">BUY</option>
+                  <option value="SELL">SELL</option>
+                </select>
+              </label>
+              <label class="full">
+                <span>Remark</span>
+                <input name="remark" value="manual agent order" />
+              </label>
+              <div class="button-row full">
+                <button id="quote-button" type="button">Fetch Quote</button>
+                <button id="submit-order" type="submit" class="primary">Submit Paper Order</button>
+              </div>
+              <div id="quote-summary" class="quote-summary full"></div>
             </form>
-          </div>
-          <button id="refresh-button" class="text-link">Refresh Broker State</button>
-          <div id="autopilot-status" class="ops-note"></div>
-          <p class="ops-note">The dashboard loads from cached state first so the page stays responsive even if OpenD is slow.</p>
-          <p id="notice" class="banner ok hidden"></p>
-          <p id="error" class="banner error hidden"></p>
-        </aside>
-      </section>
+            <p id="order-lock-note" class="control-locked-note hidden">Order submission is locked in public read-only mode.</p>
+          </article>
 
-      <section class="section-header">
-        <div>
-          <p class="eyebrow">Arena Board</p>
-          <h2>Capital, benchmark gap, and current leading agent</h2>
-        </div>
-      </section>
-      <section id="stats" class="stats"></section>
-
-      <section class="section-header">
-        <div>
-          <p class="eyebrow">Core Loop</p>
-          <h2>Agents and order entry</h2>
-        </div>
-      </section>
-      <section class="grid two layout-main">
-        <article class="panel panel-sleeves">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Agents</p>
-              <h2>Competition State</h2>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Recent Orders</p>
+                <h2>Broker Order Log</h2>
+              </div>
             </div>
-            <span id="winner-badge" class="pill neutral">waiting</span>
-          </div>
-          <div id="agents" class="stack"></div>
-        </article>
+            <div id="broker-orders" class="stack"></div>
+          </article>
+        </section>
+      </div>
 
-        <article class="panel panel-order">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Order Ticket</p>
-              <h2>Submit Agent-Tagged Order</h2>
-            </div>
-            <span class="pill warn">Limit Orders</span>
+      <!-- ── System tab ── -->
+      <div class="tab-panel hidden" id="tab-system" role="tabpanel">
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">System</p>
+            <h2>Broker, autopilot, and risk controls</h2>
           </div>
-          <form id="order-form" class="order-form">
-            <label>
-              <span>Symbol</span>
-              <input name="symbol" value="US.NVDA" />
-            </label>
-            <label>
-              <span>Live Agent</span>
-              <select name="agent_slug" id="agent-select"></select>
-            </label>
-            <label>
-              <span>Quantity</span>
-              <input type="number" name="quantity" min="1" step="1" value="1" />
-            </label>
-            <label>
-              <span>Limit Price</span>
-              <input type="number" name="limit_price" min="0.01" step="0.01" value="100" />
-            </label>
-            <label>
-              <span>Side</span>
-              <select name="side">
-                <option value="BUY">BUY</option>
-                <option value="SELL">SELL</option>
-              </select>
-            </label>
-            <label class="full">
-              <span>Remark</span>
-              <input name="remark" value="manual agent order" />
-            </label>
-            <div class="button-row full">
-              <button id="quote-button" type="button">Fetch Quote</button>
-              <button id="submit-order" type="submit" class="primary">Submit Paper Order</button>
+        </section>
+        <section class="grid two">
+          <article class="panel panel-broker">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Broker</p>
+                <h2>Connection and Alerts</h2>
+              </div>
+              <span id="broker-pill" class="pill neutral">unknown</span>
             </div>
-            <div id="quote-summary" class="quote-summary full"></div>
-          </form>
-          <p id="order-lock-note" class="control-locked-note hidden">Order submission is locked in public read-only mode.</p>
-        </article>
-      </section>
+            <div id="broker-summary" class="mini-grid"></div>
+            <ul id="warnings" class="warning-list"></ul>
+            <div id="alerts" class="stack"></div>
+          </article>
 
-      <section class="section-header">
-        <div>
-          <p class="eyebrow">Ledger</p>
-          <h2>Virtual positions and benchmark-aware ledger</h2>
-        </div>
-      </section>
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Agent Ledger</p>
-              <h2>Virtual Holdings</h2>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Risk &amp; Settings</p>
+                <h2>Runtime Configuration</h2>
+              </div>
             </div>
-          </div>
-          <div id="agent-positions" class="stack"></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Agent Ledger</p>
-              <h2>Recent Trade Events</h2>
-            </div>
-          </div>
-          <div id="agent-trades" class="stack"></div>
-        </article>
-      </section>
-
-      <section class="section-header section-header-with-action">
-        <div>
-          <p class="eyebrow">Research Queues</p>
-          <h2>Generated ideas by agent</h2>
-        </div>
-        <button id="run-research-button" class="section-action research-action">Run Research</button>
-      </section>
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Live Research Queue</p>
-              <h2>Pick-and-Shovel Ideas</h2>
-            </div>
-          </div>
-          <div id="decisions-pick-shovel" class="stack"></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Live Research Queue</p>
-              <h2>Liberated Ideas</h2>
-            </div>
-          </div>
-          <div id="decisions-liberated" class="stack"></div>
-        </article>
-      </section>
-
-      <section class="section-header">
-        <div>
-          <p class="eyebrow">Research and Broker</p>
-          <h2>Universe approval and operational state</h2>
-        </div>
-      </section>
-
-      <section class="grid two">
-        <article class="panel panel-universe">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Universe</p>
-              <h2>Approved US Stocks</h2>
-              <p class="panel-note">The Pick-and-Shovel universe can now evolve: approved names keep their live conviction score, strong specialist conviction can promote new symbols, and repeated weak unheld runs can remove them.</p>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Name</th>
-                  <th>Theme</th>
-                  <th>Score</th>
-                </tr>
-              </thead>
-              <tbody id="companies"></tbody>
-            </table>
-          </div>
-        </article>
-
-        <article class="panel panel-broker">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Broker</p>
-              <h2>Connection and Alerts</h2>
-            </div>
-            <span id="broker-pill" class="pill neutral">unknown</span>
-          </div>
-          <div id="broker-summary" class="mini-grid"></div>
-          <ul id="warnings" class="warning-list"></ul>
-          <div id="alerts" class="stack"></div>
-        </article>
-      </section>
-
-      <section class="section-header">
-        <div>
-          <p class="eyebrow">Ownership</p>
-          <h2>Broker Holdings and Owners</h2>
-        </div>
-      </section>
-      <section class="grid">
-        <article class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Owned Positions</p>
-              <h2>Pick-and-Shovel and Liberated Holdings</h2>
-            </div>
-          </div>
-          <div id="positions" class="stack"></div>
-        </article>
-      </section>
+            <div id="risk-summary" class="mini-grid"></div>
+          </article>
+        </section>
+      </div>
 
     </main>
-    <script src="/static/app.js?v=20260411-12" defer></script>
+    <script src="/static/app.js?v=20260413-4" defer></script>
   </body>
 </html>
-
-
-

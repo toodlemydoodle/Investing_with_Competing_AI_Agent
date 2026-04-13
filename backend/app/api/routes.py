@@ -192,9 +192,6 @@ def map_settings(settings: Settings, db: Session, *, request: Request) -> Settin
         selected_acc_id=get_selected_account_id(db, settings),
         agent_autopilot_enabled=bool(autopilot['enabled']),
         agent_autopilot_interval_seconds=settings.agent_autopilot_interval_seconds,
-        agent_max_orders_per_cycle=settings.agent_max_orders_per_cycle,
-        agent_take_profit_pct=settings.agent_take_profit_pct,
-        agent_stop_loss_pct=settings.agent_stop_loss_pct,
         agent_autopilot_last_cycle_at=autopilot['last_cycle_at'],
         agent_autopilot_last_summary=autopilot['last_summary'],
         competition_benchmark_symbol=str(benchmark['symbol']),
@@ -204,15 +201,7 @@ def map_settings(settings: Settings, db: Session, *, request: Request) -> Settin
         competition_benchmark_last_updated_at=benchmark['last_updated_at'],
         competition_benchmark_history=benchmark['history'],
         research_enabled=settings.research_enabled,
-        research_max_symbols_per_agent=settings.research_max_symbols_per_agent,
-        research_max_generated_decisions_per_agent=settings.research_max_generated_decisions_per_agent,
-        research_min_buy_score=settings.research_min_buy_score,
-        research_min_hold_score=settings.research_min_hold_score,
         risk_bankroll_cap=settings.risk_bankroll_cap,
-        risk_max_order_notional=runtime_settings.risk_max_order_notional,
-        risk_max_open_positions=settings.risk_max_open_positions,
-        risk_max_positions_per_theme=settings.risk_max_positions_per_theme,
-        risk_daily_loss_limit=settings.risk_daily_loss_limit,
     )
 
 
