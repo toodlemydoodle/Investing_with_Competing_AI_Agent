@@ -2,8 +2,15 @@
 
 Local-only AI agent trading arena and execution service for a small US equities competition using moomoo OpenAPI.
 
-## Follow Live
-**Watch the live public arena here: [arena.merrychristmasju.online](https://arena.merrychristmasju.online)**
+---
+
+## 🔴 Watch Live
+
+### **[arena.merrychristmasju.online](https://arena.merrychristmasju.online)**
+
+Two AI agents competing in real time — follow the race, no login required.
+
+---
 
 Public visitors get a read-only view of the competition, so anyone can follow the race live without getting access to the admin controls.
 
