@@ -263,14 +263,17 @@ def _competition_adjusted_conviction(
 ) -> float:
     adjusted = conviction
     if pressure.aggression > COMPETITION_EPSILON:
-        if conviction >= 7.5:
+        # Trailing: only boost new high-conviction picks — hunt better opportunities, don't just bet bigger on everything
+        if conviction >= 8.0 and not is_held:
             adjusted += 0.35 * pressure.aggression
-        elif conviction >= 6.8:
-            adjusted += 0.20 * pressure.aggression
-        elif conviction >= 6.2 and not is_held:
-            adjusted += 0.08 * pressure.aggression
-    elif pressure.discipline > COMPETITION_EPSILON and not is_held:
-        adjusted -= (0.18 if conviction <= 7.0 else 0.10) * pressure.discipline
+        elif conviction >= 7.0 and not is_held:
+            adjusted += 0.15 * pressure.aggression
+    elif pressure.discipline > COMPETITION_EPSILON:
+        # Leading: cut weak holdings to protect lead, leave high-conviction positions alone
+        if conviction < 6.0 and is_held:
+            adjusted -= 0.20 * pressure.discipline
+        elif conviction < 7.0 and is_held:
+            adjusted -= 0.10 * pressure.discipline
     return round(_clamp(adjusted, 0.0, 10.0), 2)
 
 

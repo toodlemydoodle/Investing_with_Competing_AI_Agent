@@ -20,7 +20,6 @@ from app.models.entities import Alert
 from app.models.entities import AppSetting
 from app.models.entities import BrokerAccount
 from app.models.entities import BrokerOrder
-from app.models.entities import Company
 from app.models.entities import Decision
 from app.models.entities import Position
 from app.models.entities import StrategyAgent
@@ -40,6 +39,8 @@ BENCHMARK_START_AT_KEY = 'competition_benchmark_start_at'
 LEADER_BONUS_RECIPIENT_KEY = 'leader_bonus_recipient'
 LEADER_BONUS_AMOUNT_KEY = 'leader_bonus_amount'
 AGENT_BONUS_TOTAL_KEY_PREFIX = 'agent_bonus_total::'
+AGENT_TWR_PERIODS_KEY_PREFIX = 'agent_twr_periods::'
+AGENT_TWR_PERIOD_START_KEY_PREFIX = 'agent_twr_period_start::'
 AGENT_BENCHMARK_CHECKPOINT_KEY_PREFIX = 'agent_benchmark_checkpoint::'
 AGENT_CASH_ONLY_KEY_PREFIX = 'agent_cash_only::'
 AGENT_CASH_ONLY_AT_KEY_PREFIX = 'agent_cash_only_at::'
@@ -66,160 +67,6 @@ BROKER_CASH_ERROR_FRAGMENTS = (
 _ADAPTER_CACHE_LOCK = Lock()
 _ADAPTER_CACHE: dict[tuple[object, ...], BrokerAdapter] = {}
 
-
-BASELINE_COMPANIES = [
-    {
-        'symbol': 'US.NVDA',
-        'name': 'NVIDIA',
-        'theme_name': 'Pick-and-Shovel Growth',
-        'sector': 'Semiconductors',
-        'theme_linkage': 9.8,
-        'multi_winner_exposure': 9.7,
-        'bottleneck_or_differentiation': 9.9,
-        'growth_proof': 9.6,
-        'management_proof': 9.1,
-        'valuation_sanity': 5.8,
-        'total_score': 9.3,
-        'rationale': 'GPU and accelerated-computing bottleneck at the center of AI training and inference demand.',
-        'is_approved': True,
-        'approval_source': 'baseline',
-    },
-    {
-        'symbol': 'US.ANET',
-        'name': 'Arista Networks',
-        'theme_name': 'Pick-and-Shovel Growth',
-        'sector': 'Networking',
-        'theme_linkage': 9.1,
-        'multi_winner_exposure': 9.2,
-        'bottleneck_or_differentiation': 8.8,
-        'growth_proof': 8.7,
-        'management_proof': 8.4,
-        'valuation_sanity': 6.6,
-        'total_score': 8.7,
-        'rationale': 'AI-scale networking supplier with strong cloud exposure and durable switching advantages.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.VRT',
-        'name': 'Vertiv',
-        'theme_name': 'Pick-and-Shovel Growth',
-        'sector': 'Electrical Equipment',
-        'theme_linkage': 8.9,
-        'multi_winner_exposure': 8.6,
-        'bottleneck_or_differentiation': 8.2,
-        'growth_proof': 8.5,
-        'management_proof': 7.8,
-        'valuation_sanity': 6.1,
-        'total_score': 8.3,
-        'rationale': 'Power and cooling infrastructure provider benefiting from AI data-center expansion.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.AVGO',
-        'name': 'Broadcom',
-        'theme_name': 'Pick-and-Shovel Growth',
-        'sector': 'Semiconductors',
-        'theme_linkage': 8.8,
-        'multi_winner_exposure': 9.0,
-        'bottleneck_or_differentiation': 8.9,
-        'growth_proof': 8.4,
-        'management_proof': 8.3,
-        'valuation_sanity': 6.0,
-        'total_score': 8.5,
-        'rationale': 'Custom silicon and infrastructure software supplier leveraged to hyperscaler capex cycles.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.TSM',
-        'name': 'Taiwan Semiconductor ADR',
-        'theme_name': 'Pick-and-Shovel Growth',
-        'sector': 'Semiconductor Foundry',
-        'theme_linkage': 9.0,
-        'multi_winner_exposure': 9.5,
-        'bottleneck_or_differentiation': 9.4,
-        'growth_proof': 8.3,
-        'management_proof': 8.7,
-        'valuation_sanity': 7.0,
-        'total_score': 8.8,
-        'rationale': 'Mission-critical advanced foundry capacity serving the leading AI chip designers.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.AMZN',
-        'name': 'Amazon',
-        'theme_name': 'Liberated US Stocks',
-        'sector': 'Internet',
-        'theme_linkage': 7.2,
-        'multi_winner_exposure': 7.7,
-        'bottleneck_or_differentiation': 7.4,
-        'growth_proof': 8.1,
-        'management_proof': 7.8,
-        'valuation_sanity': 6.4,
-        'total_score': 7.7,
-        'rationale': 'Large-cap compounder with cloud, ads, and retail optionality for the liberated agent.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.META',
-        'name': 'Meta Platforms',
-        'theme_name': 'Liberated US Stocks',
-        'sector': 'Internet',
-        'theme_linkage': 6.8,
-        'multi_winner_exposure': 7.1,
-        'bottleneck_or_differentiation': 8.0,
-        'growth_proof': 8.4,
-        'management_proof': 7.5,
-        'valuation_sanity': 6.8,
-        'total_score': 7.8,
-        'rationale': 'Cash-generating platform business with AI monetization upside and strong operating leverage.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.GOOGL',
-        'name': 'Alphabet',
-        'theme_name': 'Liberated US Stocks',
-        'sector': 'Internet',
-        'theme_linkage': 6.9,
-        'multi_winner_exposure': 7.0,
-        'bottleneck_or_differentiation': 7.8,
-        'growth_proof': 7.9,
-        'management_proof': 7.6,
-        'valuation_sanity': 7.2,
-        'total_score': 7.7,
-        'rationale': 'Search, cloud, and AI platform exposure with strong balance-sheet support.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.MSFT',
-        'name': 'Microsoft',
-        'theme_name': 'Liberated US Stocks',
-        'sector': 'Software',
-        'theme_linkage': 7.4,
-        'multi_winner_exposure': 7.8,
-        'bottleneck_or_differentiation': 8.1,
-        'growth_proof': 8.2,
-        'management_proof': 8.1,
-        'valuation_sanity': 6.3,
-        'total_score': 8.0,
-        'rationale': 'High-quality software and cloud compounder with broad enterprise AI distribution.',
-        'is_approved': True,
-    },
-    {
-        'symbol': 'US.ETN',
-        'name': 'Eaton',
-        'theme_name': 'Liberated US Stocks',
-        'sector': 'Electrical Equipment',
-        'theme_linkage': 7.7,
-        'multi_winner_exposure': 7.4,
-        'bottleneck_or_differentiation': 7.1,
-        'growth_proof': 7.6,
-        'management_proof': 7.7,
-        'valuation_sanity': 6.5,
-        'total_score': 7.5,
-        'rationale': 'Grid and power-management beneficiary with durable infrastructure demand.',
-        'is_approved': True,
-    },
-]
 
 
 def json_dump(value: object) -> str:
@@ -293,6 +140,7 @@ def award_agent_bonus(db: Session, agent_slug: str, amount: float) -> float:
     if normalized <= EPSILON:
         raise ValueError('Bonus amount must be greater than zero.')
 
+    _snapshot_twr_period(db, agent, normalized)
     total_bonus = _set_agent_bonus_total(db, agent_slug, get_agent_bonus_total(db, agent_slug) + normalized)
     set_setting_value(db, LEADER_BONUS_RECIPIENT_KEY, agent_slug)
     set_setting_value(db, LEADER_BONUS_AMOUNT_KEY, str(normalized))
@@ -301,6 +149,49 @@ def award_agent_bonus(db: Session, agent_slug: str, amount: float) -> float:
 
 def get_agent_capital_bonus(db: Session, agent_slug: str) -> float:
     return get_agent_bonus_total(db, agent_slug)
+
+
+def _agent_twr_periods_key(agent_slug: str) -> str:
+    return f'{AGENT_TWR_PERIODS_KEY_PREFIX}{agent_slug}'
+
+
+def _agent_twr_period_start_key(agent_slug: str) -> str:
+    return f'{AGENT_TWR_PERIOD_START_KEY_PREFIX}{agent_slug}'
+
+
+def _load_twr_periods(db: Session, agent_slug: str) -> list[dict[str, float]]:
+    raw = get_setting_value(db, _agent_twr_periods_key(agent_slug), '[]')
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
+def _get_twr_period_start(db: Session, agent: StrategyAgent) -> float:
+    raw = get_setting_value(db, _agent_twr_period_start_key(agent.slug), '')
+    value = _parse_float_setting(raw)
+    return value if value is not None else max(float(agent.starting_capital), EPSILON)
+
+
+def _snapshot_twr_period(db: Session, agent: StrategyAgent, injected: float) -> None:
+    period_start = _get_twr_period_start(db, agent)
+    periods = _load_twr_periods(db, agent.slug)
+    periods.append({'start': round(period_start, 2), 'end': round(float(agent.current_value), 2)})
+    set_setting_value(db, _agent_twr_periods_key(agent.slug), json.dumps(periods))
+    new_period_start = round(float(agent.current_value) + injected, 2)
+    set_setting_value(db, _agent_twr_period_start_key(agent.slug), str(new_period_start))
+
+
+def compute_agent_twr(db: Session, agent: StrategyAgent) -> float:
+    periods = _load_twr_periods(db, agent.slug)
+    chain = 1.0
+    for p in periods:
+        start = max(float(p['start']), EPSILON)
+        chain *= float(p['end']) / start
+    current_start = max(_get_twr_period_start(db, agent), EPSILON)
+    current_end = max(float(agent.current_value), 0.0)
+    chain *= current_end / current_start
+    return round((chain - 1.0) * 100, 2)
 
 
 def _agent_display_name(agent_slug: str) -> str:
@@ -862,26 +753,25 @@ def revive_agent(agent: StrategyAgent) -> None:
 
 
 def update_agent_survival_state(db: Session, agent: StrategyAgent) -> None:
-    starting_capital = max(float(agent.starting_capital), 1.0)
+    allocated_capital = max(float(agent.starting_capital) + get_agent_capital_bonus(db, agent.slug), 1.0)
     current_value = max(agent.current_value, 0.0)
-    performance_value = get_agent_performance_value(db, agent)
     agent.current_value = current_value
-    agent.total_return_pct = round(((performance_value - starting_capital) / starting_capital) * 100, 2)
+    agent.total_return_pct = compute_agent_twr(db, agent)
     agent.cash_buffer = round(agent.cash_buffer, 2)
     agent.performance_score = round(
-        clamp(5.0 + ((agent.rolling_net_pnl / starting_capital) * 25.0), 0.0, 10.0),
+        clamp(5.0 + ((agent.rolling_net_pnl / allocated_capital) * 25.0), 0.0, 10.0),
         2,
     )
     agent.survival_score = round(
-        clamp(5.0 + (((performance_value / starting_capital) - 1.0) * 20.0), 0.0, 10.0),
+        clamp(5.0 + ((current_value / allocated_capital) - 1.0) * 20.0, 0.0, 10.0),
         2,
     )
 
 
 def agent_competition_score(db: Session, agent: StrategyAgent, benchmark_return_pct: float | None = None) -> float:
-    starting_capital = max(float(agent.starting_capital), 1.0)
+    allocated_capital = max(float(agent.starting_capital) + get_agent_capital_bonus(db, agent.slug), 1.0)
     excess_return_pct = agent_excess_return_pct(agent, benchmark_return_pct)
-    rolling_pct = (agent.rolling_net_pnl / starting_capital) * 100.0
+    rolling_pct = (agent.rolling_net_pnl / allocated_capital) * 100.0
     return (excess_return_pct * 0.55) + (rolling_pct * 0.25) + (agent.performance_score * 0.20)
 
 
@@ -912,7 +802,7 @@ def get_agent_cash_history(db: Session, agent: StrategyAgent) -> list[dict[str, 
         .where(AgentTrade.agent_slug == agent.slug)
         .order_by(AgentTrade.created_at.asc(), AgentTrade.id.asc())
     ).all()
-    cash = float(agent.starting_capital)
+    cash = float(agent.starting_capital) + get_agent_capital_bonus(db, agent.slug)
     points: list[dict[str, object]] = []
 
     for trade in trades:
@@ -1433,19 +1323,6 @@ def bootstrap_database(db: Session, settings: Settings) -> None:
         for row in agent_rows:
             db.add(StrategyAgent(is_enabled=True, **row))
 
-    existing_companies = {company.symbol: company for company in db.scalars(select(Company)).all()}
-    preserved_company_fields = {'is_approved', 'total_score'}
-    for row in BASELINE_COMPANIES:
-        existing_company = existing_companies.get(row['symbol'])
-        if existing_company is None:
-            db.add(Company(**row))
-            continue
-        for key, value in row.items():
-            if key in preserved_company_fields:
-                continue
-            setattr(existing_company, key, value)
-        if not getattr(existing_company, 'approval_source', '').strip():
-            existing_company.approval_source = 'baseline'
 
     if db.scalar(select(Alert).limit(1)) is None:
         db.add(
