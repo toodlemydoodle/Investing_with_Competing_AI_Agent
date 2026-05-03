@@ -25,3 +25,4 @@ trader.db
 backend/trader.db
 *.db
 MMAPI4Python_10.1.6108/
+scripts/build_plan_pdf.py

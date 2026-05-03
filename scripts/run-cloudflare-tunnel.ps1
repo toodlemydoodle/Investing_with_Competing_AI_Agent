@@ -2,7 +2,6 @@ param(
     [string]$TunnelToken = '',
     [string]$CloudflaredPath = '',
     [string]$BackendHealthUrl = '',
-    [string]$PublicHostname = '',
     [string]$EnvFile = '',
     [switch]$SkipBackendCheck
 )
@@ -31,10 +30,6 @@ if (-not $BackendHealthUrl) {
 
 if (-not $BackendHealthUrl) {
     $BackendHealthUrl = 'http://127.0.0.1:8000/health'
-}
-
-if (-not $PublicHostname) {
-    $PublicHostname = $env:CLOUDFLARE_PUBLIC_HOSTNAME
 }
 
 function Resolve-CloudflaredPath {
@@ -89,9 +84,6 @@ if (-not $SkipBackendCheck) {
 
 Write-Host 'Starting Cloudflare Tunnel for the local arena UI...'
 Write-Host "cloudflared path: $resolvedCloudflaredPath"
-if ($PublicHostname) {
-    Write-Host "Configured public hostname: $PublicHostname"
-}
 Write-Host "Backend health endpoint: $BackendHealthUrl"
 
-& $resolvedCloudflaredPath tunnel --no-autoupdate run --token $TunnelToken
+& $resolvedCloudflaredPath tunnel --no-autoupdate --loglevel warn run --token $TunnelToken

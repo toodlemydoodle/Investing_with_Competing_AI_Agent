@@ -2,7 +2,6 @@ param(
     [string]$TunnelToken = '',
     [string]$CloudflaredPath = '',
     [string]$BackendHealthUrl = '',
-    [string]$PublicHostname = '',
     [string]$EnvFile = '',
     [int]$BackendWarmupSeconds = 20,
     [switch]$BackendAlreadyRunning
@@ -40,21 +39,17 @@ if (-not $BackendHealthUrl) {
     $BackendHealthUrl = 'http://127.0.0.1:8000/health'
 }
 
-if (-not $PublicHostname) {
-    $PublicHostname = $env:CLOUDFLARE_PUBLIC_HOSTNAME
-}
+$backendProc = $null
 
 if (-not $BackendAlreadyRunning) {
     if (-not (Test-Path $BackendScript)) {
         throw 'Missing scripts\run-backend.ps1'
     }
 
-    Write-Host 'Starting the backend in a separate PowerShell window...'
-    Start-Process powershell -ArgumentList @(
-        '-NoExit',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', $BackendScript
-    ) -WorkingDirectory $RepoRoot | Out-Null
+    Write-Host 'Starting backend...'
+    $backendProc = Start-Process powershell -ArgumentList @(
+        '-ExecutionPolicy', 'Bypass', '-File', $BackendScript
+    ) -NoNewWindow -PassThru -WorkingDirectory $RepoRoot
 
     $deadline = (Get-Date).AddSeconds([Math]::Max($BackendWarmupSeconds, 5))
     $healthy = $false
@@ -69,8 +64,20 @@ if (-not $BackendAlreadyRunning) {
     } until ($healthy -or (Get-Date) -ge $deadline)
 
     if (-not $healthy) {
-        throw "Backend never became healthy at $BackendHealthUrl."
+        Write-Warning "Backend did not respond at $BackendHealthUrl within $BackendWarmupSeconds seconds. Proceeding anyway."
     }
 }
 
-& $TunnelScript -TunnelToken $TunnelToken -CloudflaredPath $CloudflaredPath -BackendHealthUrl $BackendHealthUrl -PublicHostname $PublicHostname -EnvFile $EnvFile
+if (-not $TunnelToken) {
+    throw 'CLOUDFLARE_TUNNEL_TOKEN is empty. Check that backend\.env contains it.'
+}
+
+Write-Host 'Backend ready. Starting Cloudflare Tunnel...'
+try {
+    & $TunnelScript -TunnelToken $TunnelToken -CloudflaredPath $CloudflaredPath -BackendHealthUrl $BackendHealthUrl -EnvFile $EnvFile -SkipBackendCheck
+} finally {
+    if ($backendProc -and -not $backendProc.HasExited) {
+        Write-Host 'Stopping backend...'
+        $backendProc.Kill()
+    }
+}

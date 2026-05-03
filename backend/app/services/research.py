@@ -35,6 +35,7 @@ GOOGLE_NEWS_RSS = 'https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&c
 SEC_TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json'
 SEC_CURRENT_FEED_URL = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&count=40&output=atom'
 SEC_SUBMISSIONS_URL = 'https://data.sec.gov/submissions/CIK{cik}.json'
+EDGAR_EFTS_URL = 'https://efts.sec.gov/LATEST/search-index'
 ATOM_NS = {'atom': 'http://www.w3.org/2005/Atom'}
 FORM_SCORES = {'8-K': 0.7, '10-Q': 1.0, '10-K': 1.2, '6-K': 0.4, 'S-3': -1.1, '424B5': -0.8, 'S-8': -0.4}
 PICK_SHOVEL_THEME_NAMES = {'pick-and-shovel growth', 'pick and shovel growth', 'pick shovel growth'}
@@ -47,6 +48,50 @@ APPROVAL_PROMOTION_STREAK = 2
 APPROVAL_DEMOTION_STREAK = 3
 APPROVAL_TRACKING_LOOKBACK_DAYS = 21
 COMPETITION_EPSILON = 1e-9
+
+# Macro-trend probe queries for theme-first discovery.
+# Each entry surfaces new tickers that news mentions in the context of an emerging mega-theme.
+# Rotate / extend this list as new structural shifts emerge (e.g. nuclear power for AI, CXL memory).
+TREND_PROBES: list[tuple[str, str]] = [
+    ('silicon photonics AI GPU', 'silicon-photonics'),
+    ('optical networking data center AI', 'optical-networking'),
+    ('AI power infrastructure hyperscaler', 'ai-power-infra'),
+    ('custom ASIC AI chip semiconductor', 'custom-asic'),
+    ('HBM high bandwidth memory AI GPU', 'hbm-memory'),
+    ('liquid cooling AI data center', 'ai-cooling'),
+    ('PCIe CXL interconnect AI server', 'cxl-interconnect'),
+    ('nuclear power AI data center', 'nuclear-ai'),
+    ('AI edge inference chip embedded', 'edge-inference'),
+    ('copper cable active optical AI switch', 'ai-switch-fabric'),
+]
+
+# EDGAR full-text search queries per agent theme.
+# Each entry is (search_query, theme_label, applicable_agent_slugs).
+# Queries run against 10-K/10-Q/8-K filings — the company itself documented the connection.
+# This surfaces beneficiaries that never appear in curated ETFs or news headlines.
+EDGAR_THEME_PROBES: list[tuple[str, str, list[str]]] = [
+    ('"silicon photonics" "data center"', 'silicon-photonics', ['pick-shovel-growth']),
+    ('"optical interconnect" "artificial intelligence"', 'optical-ai', ['pick-shovel-growth']),
+    ('"custom ASIC" "hyperscaler"', 'custom-asic', ['pick-shovel-growth']),
+    ('"high bandwidth memory" "artificial intelligence"', 'hbm-ai', ['pick-shovel-growth']),
+    ('"liquid cooling" "data center" "artificial intelligence"', 'ai-cooling', ['pick-shovel-growth']),
+    ('"nuclear" "data center" "power demand"', 'nuclear-ai-power', ['pick-shovel-growth', 'liberated-us-stocks']),
+    ('"humanoid robot" "artificial intelligence"', 'humanoid-robotics', ['pick-shovel-growth', 'liberated-us-stocks']),
+    ('"GLP-1" "demand" "revenue"', 'glp1-obesity', ['liberated-us-stocks']),
+    ('"aging population" "healthcare" "growth"', 'aging-healthcare', ['liberated-us-stocks']),
+    ('"autonomous vehicle" "lidar" "revenue"', 'autonomous-lidar', ['liberated-us-stocks']),
+]
+
+# Regex patterns to extract ticker symbols from news headlines / summaries.
+# Matches: "(AAOI)", "NYSE: INTC", "Nasdaq: AVGO", "ticker SMCI", "$NVDA"
+_TICKER_RE = re.compile(
+    r'(?:'
+    r'\(([A-Z]{1,5})\)'                          # (AAOI)
+    r'|(?:NYSE|Nasdaq|NASDAQ|AMEX):\s*([A-Z]{1,5})'  # NYSE: INTC
+    r'|\bticker[:\s]+([A-Z]{1,5})\b'             # ticker SMCI
+    r'|\$([A-Z]{1,5})\b'                          # $NVDA
+    r')'
+)
 
 
 
@@ -504,6 +549,169 @@ def _current_feed_discoveries(settings: Settings, limit: int) -> list[dict[str, 
         })
         if len(results) >= limit:
             break
+    return results
+
+
+def _theme_trend_discoveries(
+    settings: Settings,
+    existing_symbols: set[str],
+    limit: int,
+) -> list[dict[str, str]]:
+    """Query Google News for macro-trend probes and extract ticker symbols from headlines.
+
+    This is theme-first discovery: we search for *the trend* and surface whichever
+    stocks news is associating with it, rather than starting from known tickers.
+    """
+    if settings.quote_provider.lower() == 'mock':
+        return []
+
+    sec_ticker_map = _load_sec_ticker_map(settings)
+    known_tickers: set[str] = {t.upper() for t in sec_ticker_map}
+
+    # Stagger probes across cycles so we don't hammer Google on every run.
+    # Use minute-of-day to pick a rotating slice of TREND_PROBES.
+    minute_slot = datetime.utcnow().minute % max(len(TREND_PROBES), 1)
+    # Pick two consecutive probes starting at the slot so each cycle covers ~2 themes.
+    probes_this_cycle = [
+        TREND_PROBES[i % len(TREND_PROBES)]
+        for i in range(minute_slot, minute_slot + 2)
+    ]
+
+    results: list[dict[str, str]] = []
+    seen: set[str] = set(existing_symbols)
+
+    for query_text, theme_label in probes_this_cycle:
+        if len(results) >= limit:
+            break
+        query = quote_plus(query_text + ' stock')
+        url = GOOGLE_NEWS_RSS.format(query=query)
+        try:
+            xml_text = _http_request_text(url, settings, {'Accept': 'application/rss+xml, application/xml;q=0.9'})
+            root = ET.fromstring(xml_text)
+        except Exception:
+            continue
+
+        items = root.findall('./channel/item')
+        for item in items[:12]:
+            title = unescape((item.findtext('title') or '').strip())
+            link = (item.findtext('link') or '').strip()
+            pub_date = (item.findtext('pubDate') or '').strip()
+            text_to_scan = title + ' ' + unescape((item.findtext('description') or ''))
+            for m in _TICKER_RE.finditer(text_to_scan):
+                ticker = next(g for g in m.groups() if g)
+                ticker = ticker.upper()
+                symbol = _normalize_symbol(ticker)
+                if symbol in seen:
+                    continue
+                # Only accept tickers that exist in SEC's company universe.
+                if ticker not in known_tickers:
+                    continue
+                seen.add(symbol)
+                results.append({
+                    'symbol': symbol,
+                    'name': sec_ticker_map.get(ticker, {}).get('name', ticker),
+                    'source_title': f'Trend probe [{theme_label}]: {title[:120]}',
+                    'source_url': link or None,
+                    'published_at': pub_date,
+                    'trend_theme': theme_label,
+                })
+                if len(results) >= limit:
+                    break
+            if len(results) >= limit:
+                break
+
+    return results
+
+
+def _edgar_fulltext_discoveries(
+    settings: Settings,
+    agent: StrategyAgent,
+    existing_symbols: set[str],
+    limit: int,
+) -> list[dict[str, str]]:
+    """Discover stocks via EDGAR full-text search of 10-K/10-Q/8-K filings.
+
+    Finds companies that explicitly discussed theme keywords in legally filed documents —
+    first-party evidence that a company is a real beneficiary, not just mentioned in headlines.
+    Rotates through EDGAR_THEME_PROBES each cycle to cover all themes over time.
+    """
+    if settings.quote_provider.lower() == 'mock':
+        return []
+
+    sec_ticker_map = _load_sec_ticker_map(settings)
+    cik_to_ticker: dict[str, str] = {
+        str(int(meta['cik'])): ticker
+        for ticker, meta in sec_ticker_map.items()
+        if meta.get('cik') and meta['cik'].isdigit()
+    }
+
+    relevant_probes = [
+        (query, label)
+        for query, label, slugs in EDGAR_THEME_PROBES
+        if agent.slug in slugs
+    ]
+    if not relevant_probes:
+        return []
+
+    minute_slot = datetime.utcnow().minute % max(len(relevant_probes), 1)
+    probes_this_cycle = [
+        relevant_probes[i % len(relevant_probes)]
+        for i in range(minute_slot, minute_slot + 2)
+    ]
+
+    one_year_ago = (datetime.utcnow() - timedelta(days=365)).strftime('%Y-%m-%d')
+    results: list[dict[str, str]] = []
+    seen: set[str] = set(existing_symbols)
+
+    for query_text, theme_label in probes_this_cycle:
+        if len(results) >= limit:
+            break
+        try:
+            from urllib.parse import urlencode
+            params = urlencode({
+                'q': query_text,
+                'forms': '10-K,10-Q,8-K',
+                'dateRange': 'custom',
+                'startdt': one_year_ago,
+            })
+            url = f'{EDGAR_EFTS_URL}?{params}'
+            raw = _http_request_text(url, settings)
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        for hit in data.get('hits', {}).get('hits', [])[:20]:
+            source = hit.get('_source', {})
+            accession_no = source.get('accession_no', '') or hit.get('_id', '')
+            entity_name = source.get('entity_name', '')
+            form_type = source.get('form_type', '')
+            file_date = source.get('file_date', '')
+
+            # CIK is the first numeric segment of the accession number (zero-padded to 10 digits)
+            raw_cik = accession_no.split('-')[0] if '-' in accession_no else ''
+            cik = str(int(raw_cik)) if raw_cik.isdigit() else ''
+            ticker = cik_to_ticker.get(cik)
+            if not ticker:
+                continue
+
+            symbol = _normalize_symbol(ticker)
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            results.append({
+                'symbol': symbol,
+                'name': entity_name or sec_ticker_map.get(ticker, {}).get('name', ticker),
+                'source_title': f'EDGAR [{theme_label}] {form_type}: {entity_name[:80]}',
+                'source_url': (
+                    f'https://www.sec.gov/cgi-bin/browse-edgar'
+                    f'?action=getcompany&CIK={cik}&type={form_type}&count=10'
+                ),
+                'published_at': file_date,
+                'trend_theme': theme_label,
+            })
+            if len(results) >= limit:
+                break
+
     return results
 
 
@@ -1168,6 +1376,28 @@ def _research_universe(
     holdings = _agent_position_symbols(db, agent)
     discoveries = _current_feed_discoveries(settings, limit=max(6, settings.research_max_symbols_per_agent * 3))
     discovered_meta = {item['symbol']: item for item in discoveries}
+
+    # Theme-first discovery: surface tickers mentioned in macro-trend news queries.
+    # These run alongside SEC filing discoveries so the agents can find stocks like
+    # AAOI/INTC from a "silicon photonics" wave before they're in the curated DB.
+    trend_limit = max(settings.research_trend_probe_limit, 1)
+    existing_in_meta = set(discovered_meta.keys()) | {_normalize_symbol(s) for s in holdings}
+    trend_discoveries = _theme_trend_discoveries(settings, existing_in_meta, limit=trend_limit)
+    for item in trend_discoveries:
+        sym = item['symbol']
+        if sym not in discovered_meta:
+            discovered_meta[sym] = item
+
+    # EDGAR full-text discovery: find companies that explicitly filed about theme keywords.
+    # First-party evidence — the company documented the connection in a legal filing.
+    edgar_limit = max(settings.research_edgar_probe_limit, 1)
+    existing_after_trend = set(discovered_meta.keys()) | {_normalize_symbol(s) for s in holdings}
+    edgar_discoveries = _edgar_fulltext_discoveries(settings, agent, existing_after_trend, limit=edgar_limit)
+    for item in edgar_discoveries:
+        sym = item['symbol']
+        if sym not in discovered_meta:
+            discovered_meta[sym] = item
+
     if agent.slug == 'pick-shovel-growth':
         approved_symbols = [
             symbol
@@ -1184,6 +1414,14 @@ def _research_universe(
         if symbol not in ordered:
             ordered.append(symbol)
     for item in discoveries:
+        if item['symbol'] not in ordered:
+            ordered.append(item['symbol'])
+    # Trend discoveries come right after SEC discoveries — high priority for new themes.
+    for item in trend_discoveries:
+        if item['symbol'] not in ordered:
+            ordered.append(item['symbol'])
+    # EDGAR discoveries: highest-conviction finds — company itself filed about the theme.
+    for item in edgar_discoveries:
         if item['symbol'] not in ordered:
             ordered.append(item['symbol'])
     for symbol in approved_symbols:
@@ -1279,12 +1517,22 @@ def refresh_live_research(db: Session, settings: Settings, agents: list[Strategy
             discovered_note = None
             if symbol in discovered_meta:
                 discovered = discovered_meta[symbol]
+                trend_theme = discovered.get('trend_theme')
+                if trend_theme:
+                    note_text = (
+                        f'{symbol} surfaced via trend-probe [{trend_theme}]: '
+                        f'{discovered.get("source_title", "")}'
+                    )
+                    note_score = 0.35
+                else:
+                    note_text = f'{symbol} surfaced through recent SEC filing flow and was added to the liberated discovery queue.'
+                    note_score = 0.2
                 discovered_note = {
                     'source_type': 'discovery',
                     'source_title': discovered.get('source_title', f'Recent SEC discovery for {symbol}'),
                     'source_url': discovered.get('source_url'),
-                    'note_text': f'{symbol} surfaced through recent SEC filing flow and was added to the liberated discovery queue.',
-                    'note_score': 0.2,
+                    'note_text': note_text,
+                    'note_score': note_score,
                     'published_at': _safe_parse_datetime(discovered.get('published_at')),
                     'raw_payload': discovered,
                 }

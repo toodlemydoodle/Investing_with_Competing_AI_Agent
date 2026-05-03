@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     research_general_external_symbol_limit: int = 6
     research_specialist_external_symbol_limit: int = 14
     research_watchlist_limit: int = 3
+    research_trend_probe_limit: int = 6
+    research_edgar_probe_limit: int = 6
 
     risk_bankroll_cap: float = 1000.0
     risk_max_order_notional: float = 150.0
